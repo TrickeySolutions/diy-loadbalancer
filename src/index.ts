@@ -58,6 +58,13 @@ export default {
 			return registry.fetch(request);
 		}
 
+		// Handle snippet requests
+		if (url.pathname === '/api/loadbalancer/snippet') {
+			const id = env.LOAD_BALANCER.idFromName('default');
+			const loadBalancer = env.LOAD_BALANCER.get(id);
+			return loadBalancer.fetch(request);
+		}
+
 		// Handle other routes (e.g., API endpoints)
 		return new Response('API endpoint not found', { status: 404 });
 	},

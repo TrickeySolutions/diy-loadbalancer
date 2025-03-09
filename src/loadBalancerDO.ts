@@ -13,6 +13,11 @@ interface HealthStatus {
 	[host: string]: boolean;
 }
 
+interface LoadBalancerSnippet {
+	code: string;
+	name: string;
+}
+
 export class LoadBalancerDO implements DurableObject {
 	private ctx: DurableObjectState;
 	private config: LoadBalancerConfig;
@@ -99,6 +104,38 @@ export class LoadBalancerDO implements DurableObject {
 			return new Response(JSON.stringify(this.config), { status: 200 });
 		}
 
+		if (request.method === 'GET' && url.pathname === '/api/loadbalancer/snippet') {
+			const name = url.searchParams.get('name');
+			if (!name) {
+				return new Response('Load balancer name is required', { status: 400 });
+			}
+
+			// Get the registry to fetch the config
+			const registryId = this.env.LOADBALANCER_REGISTRY.idFromName('default');
+			const registry = this.env.LOADBALANCER_REGISTRY.get(registryId);
+			
+			try {
+				const response = await registry.fetch(new Request(`${url.origin}/api/loadbalancers`));
+				const loadBalancers = await response.json();
+				
+				// Find the specific load balancer
+				const config = loadBalancers.find((lb: LoadBalancerConfig) => lb.name === name);
+				
+				if (!config) {
+					return new Response('Load balancer not found', { status: 404 });
+				}
+
+				const snippet = this.generateSnippet(config);
+				return new Response(JSON.stringify(snippet), {
+					status: 200,
+					headers: { 'Content-Type': 'application/json' }
+				});
+			} catch (error) {
+				console.error('Error generating snippet:', error);
+				return new Response('Failed to generate snippet', { status: 500 });
+			}
+		}
+
 		return new Response('Not found', { status: 404 });
 	}
 
@@ -181,5 +218,65 @@ export class LoadBalancerDO implements DurableObject {
 				return false;
 			}
 		});
+	}
+
+	private generateSnippet(config: LoadBalancerConfig): LoadBalancerSnippet {
+		const snippetCode = `
+export default {
+	async fetch(request, env, ctx) {
+		// Define the available backend endpoints
+		const healthyEndpoints = ${JSON.stringify(config.hosts, null, 2)};
+
+		if (healthyEndpoints.length === 0) {
+			return new Response("No available backend", { status: 503 });
+		}
+
+		// Choose a backend (random selection)
+		const selectedEndpoint = healthyEndpoints[Math.floor(Math.random() * healthyEndpoints.length)];
+		console.log(\`Selected backend: \${selectedEndpoint}\`);
+
+		// Get original request information
+		const url = new URL(request.url);
+		
+		// Create a new URL with the selected backend
+		const newUrl = new URL(url.pathname + url.search, \`https://\${selectedEndpoint}\`);
+		console.log(\`Routing request to: \${newUrl.toString()}\`);
+
+		// Create a new request with all the original properties
+		const newRequest = new Request(newUrl.toString(), {
+			method: request.method,
+			headers: request.headers,
+			body: request.body,
+			redirect: request.redirect
+		});
+
+		// Set the Host header to match the new backend
+		newRequest.headers.set("Host", selectedEndpoint);
+
+		// Fetch from the selected backend
+		const response = await fetch(newRequest);
+		
+		// Clone the response so we can read and modify it
+		const originalResponse = response.clone();
+		
+		// Create a new response with custom headers
+		const modifiedResponse = new Response(originalResponse.body, {
+			status: originalResponse.status,
+			statusText: originalResponse.statusText,
+			headers: originalResponse.headers
+		});
+		
+		// Add custom headers
+		modifiedResponse.headers.set("X-Load-Balancer", "${config.name}");
+		modifiedResponse.headers.set("X-Backend-Server", selectedEndpoint);
+		
+		return modifiedResponse;
+	}
+};`.trim();
+
+		return {
+			name: config.name,
+			code: snippetCode
+		};
 	}
 } 
