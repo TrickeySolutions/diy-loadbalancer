@@ -247,6 +247,33 @@
             padding: 0.25rem 0.5rem;
             font-size: 0.875rem;
         }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(0, 0, 0, 0.1);
+            border-radius: 50%;
+            border-top-color: var(--primary);
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .button-content {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .button-content.loading {
+            opacity: 0.7;
+        }
     </style>
     <script>
         let currentLoadBalancer = null;
@@ -372,6 +399,9 @@
                         </button>
                         <button class="btn btn-primary" onclick='showSnippet("${lb.name}")'>
                             View Snippet
+                        </button>
+                        <button class="btn btn-primary" onclick='deploySnippet("${lb.name}")'>
+                            Deploy Snippet
                         </button>
                     </div>
                 `;
@@ -594,6 +624,79 @@
             }
         }
 
+        async function showDeployConfirmDialog(name) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('deploy-confirm-modal');
+                const messageEl = document.getElementById('deploy-confirm-message');
+                const yesButton = document.getElementById('deploy-confirm-yes');
+                const noButton = document.getElementById('deploy-confirm-no');
+
+                messageEl.textContent = `Are you sure you want to deploy the snippet for "${name}"? This will update any existing deployment.`;
+                modal.classList.add('active');
+
+                function cleanup() {
+                    modal.classList.remove('active');
+                    yesButton.removeEventListener('click', handleYes);
+                    noButton.removeEventListener('click', handleNo);
+                }
+
+                function handleYes() {
+                    cleanup();
+                    resolve(true);
+                }
+
+                function handleNo() {
+                    cleanup();
+                    resolve(false);
+                }
+
+                yesButton.addEventListener('click', handleYes);
+                noButton.addEventListener('click', handleNo);
+            });
+        }
+
+        async function deploySnippet(name) {
+            const confirmed = await showDeployConfirmDialog(name);
+            
+            if (!confirmed) {
+                return;
+            }
+
+            // Get the deploy button for this load balancer
+            const deployButton = document.querySelector(`button[onclick='deploySnippet("${name}")']`);
+            const originalContent = deployButton.innerHTML;
+
+            try {
+                // Update button to show loading state
+                deployButton.innerHTML = `
+                    <span class="button-content loading">
+                        <span class="spinner"></span>
+                        Deploying...
+                    </span>
+                `;
+                deployButton.disabled = true;
+
+                const response = await fetch(`/api/loadbalancer/deploy-snippet?name=${encodeURIComponent(name)}`, {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('Snippet deployed successfully!');
+                } else {
+                    throw new Error(result.error || 'Failed to deploy snippet');
+                }
+            } catch (error) {
+                console.error('Error deploying snippet:', error);
+                alert('Failed to deploy snippet: ' + error.message);
+            } finally {
+                // Restore button to original state
+                deployButton.innerHTML = originalContent;
+                deployButton.disabled = false;
+            }
+        }
+
         // Start connection when page loads
         window.addEventListener('load', () => {
             connectWebSocket();
@@ -690,6 +793,17 @@
                 <div class="actions">
                     <button class="btn btn-primary" onclick="copySnippet()">Copy to Clipboard</button>
                     <button class="btn btn-edit" onclick="hideSnippetModal()">Close</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="modal" id="deploy-confirm-modal">
+            <div class="modal-content">
+                <h2>Deploy Snippet</h2>
+                <p id="deploy-confirm-message"></p>
+                <div class="actions">
+                    <button class="btn btn-primary" id="deploy-confirm-yes">Deploy</button>
+                    <button class="btn btn-edit" id="deploy-confirm-no">Cancel</button>
                 </div>
             </div>
         </div>
