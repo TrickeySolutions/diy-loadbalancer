@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Load Balancer Dashboard</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --success: #16a34a;
+            --warning: #ca8a04;
+            --danger: #dc2626;
+            --gray: #6b7280;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.5;
+            margin: 0;
+            padding: 20px;
+            background: #f3f4f6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 0.375rem;
+            border: none;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
+
+        .load-balancer-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+
+        .load-balancer-card {
+            background: white;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .health-indicator {
+            padding: 0.25rem 0.75rem;
+            border-radius: 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .health-healthy {
+            background: #dcfce7;
+            color: var(--success);
+        }
+
+        .health-degraded {
+            background: #fef9c3;
+            color: var(--warning);
+        }
+
+        .health-unhealthy {
+            background: #fee2e2;
+            color: var(--danger);
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 2rem;
+            border-radius: 0.5rem;
+            width: 100%;
+            max-width: 500px;
+        }
+
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.375rem;
+        }
+
+        .host-status {
+            margin: 0.5rem 0;
+            padding: 0.5rem;
+            border-radius: 0.375rem;
+            font-size: 0.875rem;
+        }
+
+        .actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .btn-edit {
+            background: #f3f4f6;
+            color: var(--gray);
+        }
+
+        .btn-edit:hover {
+            background: #e5e7eb;
+        }
+
+        .endpoints-list {
+            border: 1px solid #d1d5db;
+            border-radius: 0.375rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .endpoint-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .endpoint-item button {
+            padding: 0.25rem 0.5rem;
+            color: var(--danger);
+            background: none;
+            border: none;
+            cursor: pointer;
+        }
+
+        .add-endpoint {
+            margin-top: 0.5rem;
+        }
+
+        .btn-danger {
+            background: var(--danger);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #b91c1c;
+        }
+
+        #confirm-modal .modal-content {
+            max-width: 400px;
+        }
+
+        #confirm-modal p {
+            margin: 1rem 0;
+            color: var(--gray);
+        }
+    </style>
+    <script>
+        let currentLoadBalancer = null;
+
+        function showModal(type = 'create', loadBalancer = null) {
+            currentLoadBalancer = loadBalancer;
+            const modal = document.getElementById('lb-modal');
+            const form = document.getElementById('lb-form');
+            const title = document.getElementById('modal-title');
+            const endpointsList = document.getElementById('endpoints-list');
+
+            title.textContent = type === 'create' ? 'Create Load Balancer' : 'Edit Load Balancer';
+
+            // Clear existing endpoints
+            endpointsList.innerHTML = '';
+
+            if (loadBalancer) {
+                form.name.value = loadBalancer.name;
+                form.probeInterval.value = loadBalancer.healthCheckConfig.probeInterval;
+                form.probePath.value = loadBalancer.healthCheckConfig.probePath;
+                
+                // Add existing endpoints
+                loadBalancer.hosts.forEach(host => addEndpointToList(host));
+            } else {
+                form.reset();
+            }
+
+            modal.classList.add('active');
+        }
+
+        function addEndpointToList(value = '') {
+            const endpointsList = document.getElementById('endpoints-list');
+            const div = document.createElement('div');
+            div.className = 'endpoint-item';
+            div.innerHTML = `
+                <input type="text" class="endpoint-input" value="${value}" placeholder="Enter endpoint (e.g., example.com:8080)">
+                <button type="button" onclick="this.parentElement.remove()">×</button>
+            `;
+            endpointsList.appendChild(div);
+        }
+
+        function getEndpoints() {
+            return Array.from(document.querySelectorAll('.endpoint-input'))
+                .map(input => input.value.trim())
+                .filter(value => value !== '');
+        }
+
+        function hideModal() {
+            const modal = document.getElementById('lb-modal');
+            modal.classList.remove('active');
+            currentLoadBalancer = null;
+        }
+
+        function getHealthStatus(healthStatus) {
+            if (!healthStatus || Object.keys(healthStatus).length === 0) return 'unknown';
+            
+            const totalHosts = Object.keys(healthStatus).length;
+            const healthyHosts = Object.values(healthStatus).filter(status => status).length;
+
+            if (healthyHosts === totalHosts) return 'healthy';
+            if (healthyHosts === 0) return 'unhealthy';
+            return 'degraded';
+        }
+
+        function getHealthStatusLabel(status) {
+            const labels = {
+                'healthy': '✅ Healthy',
+                'degraded': '⚠️ Degraded',
+                'unhealthy': '❌ Unhealthy',
+                'unknown': '❓ Unknown'
+            };
+            return labels[status] || labels.unknown;
+        }
+
+        function updateLoadBalancersList(loadbalancers) {
+            const container = document.getElementById('loadbalancers-list');
+            container.innerHTML = '';
+            
+            if (!Array.isArray(loadbalancers)) {
+                console.error('Expected array of loadbalancers, got:', loadbalancers);
+                return;
+            }
+
+            loadbalancers.forEach(lb => {
+                const healthStatus = getHealthStatus(lb.healthStatus);
+                const card = document.createElement('div');
+                card.className = 'load-balancer-card';
+                card.innerHTML = `
+                    <div class="card-header">
+                        <h3>${lb.name || 'Unnamed'}</h3>
+                        <span class="health-indicator health-${healthStatus}">
+                            ${getHealthStatusLabel(healthStatus)}
+                        </span>
+                    </div>
+                    <div class="hosts">
+                        ${lb.hosts && lb.hosts.length > 0 
+                            ? lb.hosts.map(host => `
+                                <div class="host-status ${lb.healthStatus?.[host] ? 'healthy' : 'unhealthy'}">
+                                    ${host}: ${lb.healthStatus?.[host] ? '✅' : '❌'}
+                                </div>
+                            `).join('')
+                            : 'No hosts configured'}
+                    </div>
+                    <div class="actions">
+                        <button class="btn btn-edit" onclick='showModal("edit", ${JSON.stringify(lb).replace(/'/g, "&#39;")})'>
+                            Edit
+                        </button>
+                        <button class="btn btn-danger" onclick='deleteLoadBalancer("${lb.name}")'>
+                            Delete
+                        </button>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        function connectWebSocket() {
+            const ws = new WebSocket('ws://localhost:8787/api/ws');
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'initialHealthStatus' || data.type === 'healthStatusUpdate') {
+                    console.log('Health Status:', data.healthStatus);
+                    updateHealthStatusUI(data.healthStatus);
+                } else if (data.type === 'configUpdate') {
+                    console.log('Config Update:', data.config);
+                    updateConfigUI(data.config);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = (event) => {
+                console.log('WebSocket closed. Attempting to reconnect in 5 seconds...');
+                setTimeout(connectWebSocket, 5000);
+            };
+        }
+
+        function updateHealthStatusUI(healthStatus) {
+            const statusDiv = document.getElementById('health-status');
+            let html = '<h2>Health Status</h2>';
+            for (const [host, status] of Object.entries(healthStatus)) {
+                const statusClass = status ? 'healthy' : 'unhealthy';
+                html += `<div class="host-status ${statusClass}">
+                    <span>${host}</span>: ${status ? '✅ Healthy' : '❌ Unhealthy'}
+                </div>`;
+            }
+            statusDiv.innerHTML = html;
+        }
+
+        function updateConfigUI(config) {
+            document.querySelector('input[name="name"]').value = config.name;
+            document.querySelector('input[name="probeInterval"]').value = config.healthCheckConfig.probeInterval;
+            document.querySelector('input[name="probePath"]').value = config.healthCheckConfig.probePath;
+        }
+
+        async function createLoadBalancer(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const data = {
+                name: formData.get('name'),
+                hosts: getEndpoints(),
+                healthCheckConfig: {
+                    probeInterval: parseInt(formData.get('probeInterval')),
+                    probePath: formData.get('probePath')
+                }
+            };
+
+            try {
+                const response = await fetch('/api/loadbalancer', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    if (result.success) {
+                        console.log('Load balancer created/updated successfully');
+                        alert('Load balancer created/updated successfully!');
+                        hideModal(); // Hide the modal
+                        event.target.reset(); // Reset the form
+                        await fetchLoadBalancers(); // Refresh the list
+                    } else {
+                        throw new Error('Failed to create load balancer');
+                    }
+                } else {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Failed to create/update load balancer: ' + error.message);
+            }
+        }
+
+        async function fetchLoadBalancers() {
+            try {
+                const response = await fetch('/api/loadbalancers');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const loadbalancers = await response.json();
+                // Update your UI with the loadbalancers data
+                updateLoadBalancersList(loadbalancers);
+            } catch (error) {
+                console.error('Failed to fetch load balancers:', error);
+            }
+        }
+
+        function showConfirmDialog(message) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('confirm-modal');
+                const messageEl = document.getElementById('confirm-message');
+                const yesButton = document.getElementById('confirm-yes');
+                const noButton = document.getElementById('confirm-no');
+
+                messageEl.textContent = message;
+                modal.classList.add('active');
+
+                function cleanup() {
+                    modal.classList.remove('active');
+                    yesButton.removeEventListener('click', handleYes);
+                    noButton.removeEventListener('click', handleNo);
+                }
+
+                function handleYes() {
+                    cleanup();
+                    resolve(true);
+                }
+
+                function handleNo() {
+                    cleanup();
+                    resolve(false);
+                }
+
+                yesButton.addEventListener('click', handleYes);
+                noButton.addEventListener('click', handleNo);
+            });
+        }
+
+        async function deleteLoadBalancer(name) {
+            const confirmed = await showConfirmDialog(`Are you sure you want to delete the load balancer "${name}"?`);
+            
+            if (!confirmed) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/loadbalancer/${name}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    await fetchLoadBalancers(); // Refresh the list
+                } else {
+                    throw new Error(`Failed to delete load balancer: ${response.statusText}`);
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Failed to delete load balancer: ' + error.message);
+            }
+        }
+
+        // Start connection when page loads
+        window.addEventListener('load', () => {
+            connectWebSocket();
+            fetchLoadBalancers(); // Fetch load balancers on load
+        });
+    </script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Load Balancer Dashboard</h1>
+            <button class="btn btn-primary" onclick="showModal('create')">
+                Create Load Balancer
+            </button>
+        </div>
+
+        <div class="load-balancer-grid" id="loadbalancers-list">
+            <!-- Load balancers will be inserted here -->
+        </div>
+
+        <div class="modal" id="lb-modal">
+            <div class="modal-content">
+                <h2 id="modal-title">Create Load Balancer</h2>
+                <form id="lb-form" onsubmit="createLoadBalancer(event)">
+                    <div class="form-group">
+                        <label for="name">Load Balancer Name:</label>
+                        <input type="text" name="name" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Endpoints:</label>
+                        <div id="endpoints-list" class="endpoints-list">
+                            <!-- Endpoints will be added here -->
+                        </div>
+                        <button type="button" class="btn btn-edit add-endpoint" onclick="addEndpointToList()">
+                            Add Endpoint
+                        </button>
+                    </div>
+                    <div class="form-group">
+                        <label for="probeInterval">Probe Interval (seconds):</label>
+                        <input type="number" name="probeInterval" value="30" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="probePath">Probe Path:</label>
+                        <input type="text" name="probePath" value="/" required>
+                    </div>
+                    <div class="actions">
+                        <button type="submit" class="btn btn-primary">Save</button>
+                        <button type="button" class="btn btn-edit" onclick="hideModal()">Cancel</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="modal" id="confirm-modal">
+            <div class="modal-content">
+                <h2>Confirm Delete</h2>
+                <p id="confirm-message"></p>
+                <div class="actions">
+                    <button class="btn btn-danger" id="confirm-yes">Delete</button>
+                    <button class="btn btn-edit" id="confirm-no">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
