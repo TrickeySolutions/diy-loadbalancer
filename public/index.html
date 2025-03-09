@@ -219,6 +219,34 @@
             max-width: 800px;
             width: 90%;
         }
+
+        .expression-config {
+            background: #f8f9fa;
+            padding: 1rem;
+            border-radius: 0.375rem;
+            margin-bottom: 1rem;
+        }
+
+        .help-text {
+            color: var(--gray);
+            font-size: 0.875rem;
+            margin-top: 0.25rem;
+            display: block;
+        }
+
+        .expression-preview {
+            background: #f8f9fa;
+            padding: 0.5rem;
+            border-radius: 0.375rem;
+            font-family: monospace;
+            margin-top: 0.5rem;
+            font-size: 0.875rem;
+        }
+
+        .copy-button {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.875rem;
+        }
     </style>
     <script>
         let currentLoadBalancer = null;
@@ -239,6 +267,10 @@
                 form.name.value = loadBalancer.name;
                 form.probeInterval.value = loadBalancer.healthCheckConfig.probeInterval;
                 form.probePath.value = loadBalancer.healthCheckConfig.probePath;
+                
+                // Add expression values
+                form.expressionHostname.value = loadBalancer.expression?.hostname || '';
+                form.expressionPath.value = loadBalancer.expression?.path || '';
                 
                 // Add existing endpoints
                 loadBalancer.hosts.forEach(host => addEndpointToList(host));
@@ -313,6 +345,15 @@
                             ${getHealthStatusLabel(healthStatus)}
                         </span>
                     </div>
+                    <div class="expression-section">
+                        <h4>Expression:</h4>
+                        <div class="expression-preview">
+                            ${generateExpressionPreview(lb.expression)}
+                            <button class="btn btn-edit copy-button" onclick='copyExpression(${JSON.stringify(lb.expression)})'>
+                                Copy
+                            </button>
+                        </div>
+                    </div>
                     <div class="hosts">
                         ${lb.hosts && lb.hosts.length > 0 
                             ? lb.hosts.map(host => `
@@ -336,6 +377,29 @@
                 `;
                 container.appendChild(card);
             });
+        }
+
+        function generateExpressionPreview(expression) {
+            const conditions = [];
+            if (expression?.hostname) {
+                conditions.push(`(http.host eq "${expression.hostname}")`);
+            }
+            if (expression?.path) {
+                conditions.push(`(http.request.uri.path starts-with "${expression.path}")`);
+            }
+            return conditions.length > 0 
+                ? conditions.join(' and ')
+                : 'Match all requests';
+        }
+
+        async function copyExpression(expression) {
+            try {
+                await navigator.clipboard.writeText(generateExpressionPreview(expression));
+                alert('Expression copied to clipboard!');
+            } catch (err) {
+                console.error('Failed to copy expression:', err);
+                alert('Failed to copy expression to clipboard');
+            }
         }
 
         function connectWebSocket() {
@@ -393,6 +457,10 @@
                 healthCheckConfig: {
                     probeInterval: parseInt(formData.get('probeInterval')),
                     probePath: formData.get('probePath')
+                },
+                expression: {
+                    hostname: formData.get('expressionHostname') || undefined,
+                    path: formData.get('expressionPath') || undefined
                 }
             };
 
@@ -570,6 +638,29 @@
                     <div class="form-group">
                         <label for="probePath">Probe Path:</label>
                         <input type="text" name="probePath" value="/" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Expression Configuration:</label>
+                        <div class="expression-config">
+                            <div class="form-group">
+                                <label for="expressionHostname">Hostname:</label>
+                                <input 
+                                    type="text" 
+                                    name="expressionHostname" 
+                                    placeholder="e.g., api.example.com"
+                                    class="expression-input">
+                                <small class="help-text">Leave empty to match any hostname</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="expressionPath">Path:</label>
+                                <input 
+                                    type="text" 
+                                    name="expressionPath" 
+                                    placeholder="e.g., /api/*"
+                                    class="expression-input">
+                                <small class="help-text">Leave empty to match any path</small>
+                            </div>
+                        </div>
                     </div>
                     <div class="actions">
                         <button type="submit" class="btn btn-primary">Save</button>

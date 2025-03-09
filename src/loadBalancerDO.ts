@@ -7,6 +7,10 @@ interface LoadBalancerConfig {
 		probeInterval: number; // in seconds
 		probePath: string; // path to check
 	};
+	expression: {
+		hostname?: string;
+		path?: string;
+	};
 }
 
 interface HealthStatus {
@@ -221,9 +225,24 @@ export class LoadBalancerDO implements DurableObject {
 	}
 
 	private generateSnippet(config: LoadBalancerConfig): LoadBalancerSnippet {
+		const conditions = [];
+		if (config.expression?.hostname) {
+			conditions.push(`(http.host eq "${config.expression.hostname}")`);
+		}
+		if (config.expression?.path) {
+			conditions.push(`(http.request.uri.path starts-with "${config.expression.path}")`);
+		}
+
+		const expressionCheck = conditions.length > 0
+			? `\n\t\t// Check if request matches the expression: ${conditions.join(' and ')}\n\t\tif (!(${conditions.join(' && ')})) {\n\t\t\treturn fetch(request);\n\t\t}\n`
+			: '';
+
 		const snippetCode = `
 export default {
 	async fetch(request, env, ctx) {
+		// Get original request information
+		const url = new URL(request.url);${expressionCheck}
+		
 		// Define the available backend endpoints
 		const healthyEndpoints = ${JSON.stringify(config.hosts, null, 2)};
 
@@ -235,9 +254,6 @@ export default {
 		const selectedEndpoint = healthyEndpoints[Math.floor(Math.random() * healthyEndpoints.length)];
 		console.log(\`Selected backend: \${selectedEndpoint}\`);
 
-		// Get original request information
-		const url = new URL(request.url);
-		
 		// Create a new URL with the selected backend
 		const newUrl = new URL(url.pathname + url.search, \`https://\${selectedEndpoint}\`);
 		console.log(\`Routing request to: \${newUrl.toString()}\`);
