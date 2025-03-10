@@ -17,6 +17,7 @@ interface MonitorResult {
 
 export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
     LOAD_BALANCER: DurableObjectNamespace;
+    LOAD_BALANCER_REGISTRY: DurableObjectNamespace;
 }, EndpointMonitorParams> {
     async run(event: WorkflowEvent<EndpointMonitorParams>, step: WorkflowStep): Promise<MonitorResult> {
         const { loadBalancerName, endpoint, probePath } = event.payload;
@@ -30,8 +31,8 @@ export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
         });
 
         // Step 1: Test the endpoint
-        const testResult = await step.do(
-            'test-endpoint',
+        const result = await step.do(
+            'check-endpoint',
             {
                 retries: {
                     limit: 2,
@@ -40,30 +41,19 @@ export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
                 },
             },
             async (): Promise<MonitorResult> => {
-                console.log(`\nTesting endpoint ${endpoint}`);
-                console.log(`URL: http://${endpoint}${probePath}`);
+                console.log(`Testing endpoint ${endpoint}`);
                 const startTime = Date.now();
                 
                 try {
-                    const response = await fetch(`http://${endpoint}${probePath}`, {
-                        method: 'GET',
-                        headers: {
-                            'User-Agent': 'DIY-LoadBalancer-HealthCheck/1.0',
-                        },
-                    });
-
+                    const response = await fetch(`http://${endpoint}${probePath}`);
                     const responseTime = Date.now() - startTime;
                     const isHealthy = response.status < 400;
-                    const message = isHealthy 
-                        ? `Healthy (${response.status})`
-                        : `Unhealthy - Status: ${response.status}`;
-
+                    
                     console.log('Health check result:', {
                         endpoint,
                         status: response.status,
                         isHealthy,
-                        responseTime: `${responseTime}ms`,
-                        message
+                        responseTime
                     });
 
                     return {
@@ -71,32 +61,30 @@ export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
                         isHealthy,
                         statusCode: response.status,
                         responseTime,
-                        timestamp: Date.now(),
-                        message
+                        timestamp: Date.now()
                     };
                 } catch (error) {
-                    const responseTime = Date.now() - startTime;
-                    const message = error instanceof Error 
-                        ? `Unhealthy - ${error.message}`
-                        : 'Unhealthy - Connection failed';
-                    
-                    console.log('Health check result:', {
-                        endpoint,
-                        isHealthy: false,
-                        responseTime: `${responseTime}ms`,
-                        message
-                    });
-
+                    console.error('Health check failed:', error);
                     return {
                         endpoint,
                         isHealthy: false,
-                        responseTime,
+                        responseTime: Date.now() - startTime,
                         timestamp: Date.now(),
-                        message
+                        message: error instanceof Error ? error.message : 'Unknown error'
                     };
                 }
             }
         );
+
+        // After the health check
+        console.log('Health check completed with result:', {
+            endpoint: result.endpoint,
+            isHealthy: result.isHealthy,
+            statusCode: result.statusCode,
+            responseTime: result.responseTime,
+            timestamp: result.timestamp,
+            message: result.message
+        });
 
         // Step 2: Update the load balancer's health status
         console.log('\nUpdating load balancer health status');
@@ -113,23 +101,61 @@ export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
                 const id = this.env.LOAD_BALANCER.idFromName(loadBalancerName);
                 const loadBalancer = this.env.LOAD_BALANCER.get(id);
                 
-                await loadBalancer.fetch(new Request('http://localhost/api/health-status/update', {
+                const updateResponse = await loadBalancer.fetch(new Request('http://localhost/api/health-status/update', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        endpoint: testResult.endpoint,
-                        isHealthy: testResult.isHealthy,
-                        timestamp: testResult.timestamp
+                        endpoint: result.endpoint,
+                        loadBalancerName: event.payload.loadBalancerName,
+                        isHealthy: result.isHealthy,
+                        timestamp: Date.now()
                     })
                 }));
-                console.log('Health status updated successfully');
+
+                const updateResult = await updateResponse.json();
+                console.log('Health status update response:', updateResult);
+
+                // Add verification step
+                console.log('\n=== Verifying Health Status Update ===');
+                // Simulate the frontend request to verify the status
+                const verifyResponse = await loadBalancer.fetch(new Request('http://localhost/api/health-status', {
+                    method: 'GET',
+                    headers: {
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache'
+                    }
+                }));
+
+                const verifyStatus = await verifyResponse.json();
+                console.log('Verification - Current DO health status:', JSON.stringify(verifyStatus, null, 2));
+
+                // Also verify through the registry to see what the frontend would get
+                const registryId = this.env.LOADBALANCER_REGISTRY.idFromName('default');
+                const registry = this.env.LOADBALANCER_REGISTRY.get(registryId);
+                const registryResponse = await registry.fetch(new Request('http://localhost/api/loadbalancers', {
+                    headers: {
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache'
+                    }
+                }));
+
+                const registryData = await registryResponse.json();
+                console.log('Verification - What frontend would receive:', JSON.stringify(registryData, null, 2));
+                console.log('=== Verification Complete ===\n');
             }
         );
 
+        // Before sending the update
+        console.log('Sending health status update with:', {
+            endpoint: result.endpoint,
+            isHealthy: result.isHealthy,
+            timestamp: Date.now()
+        });
+
         console.log('=== Endpoint Monitor Complete ===\n');
-        return testResult;
+        return result;
     }
 }
 

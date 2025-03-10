@@ -25,6 +25,30 @@ export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 
+		// Debug endpoint to check LoadBalancerDO health status directly
+		if (url.pathname === '/api/debug/health-status') {
+			// Get the load balancer name from query parameter
+			const name = url.searchParams.get('name') || 'default';
+			const id = env.LOAD_BALANCER.idFromName(name);
+			const loadBalancer = env.LOAD_BALANCER.get(id);
+			return loadBalancer.fetch(request);
+		}
+
+		// Debug endpoint to see what LoadBalancerRegistryDO has
+		if (url.pathname === '/api/debug/registry-status') {
+			const id = env.LOADBALANCER_REGISTRY.idFromName('default');
+			const registry = env.LOADBALANCER_REGISTRY.get(id);
+			
+			const response = await registry.fetch(new Request('http://localhost/api/loadbalancers'));
+			const data = await response.json();
+			
+			return new Response(JSON.stringify({
+				registryData: data
+			}, null, 2), {
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
+
 		// Serve the index.html file for the root URL
 		if (url.pathname === '/') {
 			try {
@@ -65,9 +89,23 @@ export default {
 
 		// Handle delete requests
 		if (url.pathname.startsWith('/api/loadbalancer/') && request.method === 'DELETE') {
+			const name = decodeURIComponent(url.pathname.split('/').pop()!);
+			
+			// First delete from registry
 			const registryId = env.LOADBALANCER_REGISTRY.idFromName('default');
 			const registry = env.LOADBALANCER_REGISTRY.get(registryId);
-			return registry.fetch(request);
+			const registryResponse = await registry.fetch(request);
+			
+			if (registryResponse.ok) {
+				// Then delete from load balancer DO
+				const id = env.LOAD_BALANCER.idFromName(name);
+				const loadBalancer = env.LOAD_BALANCER.get(id);
+				return loadBalancer.fetch(new Request('http://localhost/api/loadbalancer/delete', {
+					method: 'DELETE'
+				}));
+			}
+			
+			return registryResponse;
 		}
 
 		// Handle snippet requests

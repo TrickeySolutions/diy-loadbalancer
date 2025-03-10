@@ -140,6 +140,11 @@
             border-radius: 0.375rem;
             padding: 0.75rem;
             margin: 0.5rem 0;
+            transition: all 0.2s;
+        }
+
+        .host-status:hover .host-details {
+            display: block;
         }
 
         .host-info {
@@ -152,7 +157,6 @@
             width: 0.75rem;
             height: 0.75rem;
             border-radius: 50%;
-            background: var(--gray);
         }
 
         .status-indicator.healthy {
@@ -169,9 +173,7 @@
         }
 
         .host-details {
-            display: flex;
-            flex-direction: column;
-            gap: 0.25rem;
+            display: none;
             margin-top: 0.5rem;
             font-size: 0.75rem;
             color: var(--gray);
@@ -181,11 +183,8 @@
             font-weight: 500;
         }
 
-        .next-check {
-            font-style: italic;
-        }
-
-        .last-check {
+        .next-check, .last-check {
+            display: block;
             font-style: italic;
         }
 
@@ -447,7 +446,9 @@
     </style>
     <script>
         let currentLoadBalancer = null;
-        let socket;
+        let socket = null;
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 5;
 
         function showModal(type = 'create', loadBalancer = null) {
             currentLoadBalancer = loadBalancer;
@@ -506,8 +507,9 @@
             if (!healthStatus || Object.keys(healthStatus).length === 0) return 'unknown';
             
             const totalHosts = Object.keys(healthStatus).length;
-            const healthyHosts = Object.values(healthStatus).filter(status => status).length;
-
+            const healthyHosts = Object.values(healthStatus)
+                .filter(status => status?.isHealthy).length;
+            
             if (healthyHosts === totalHosts) return 'healthy';
             if (healthyHosts === 0) return 'unhealthy';
             return 'degraded';
@@ -515,25 +517,68 @@
 
         function getHealthStatusLabel(status) {
             const labels = {
-                'healthy': '✅ Healthy',
-                'degraded': '⚠️ Degraded',
-                'unhealthy': '❌ Unhealthy',
-                'unknown': '❓ Unknown'
+                'healthy': '✅ All Endpoints Healthy',
+                'degraded': '⚠️ Some Endpoints Unhealthy',
+                'unhealthy': '❌ All Endpoints Down',
+                'unknown': '❓ Status Unknown'
             };
             return labels[status] || labels.unknown;
+        }
+
+        function updateHealthStatus(healthStatus) {
+            console.log('updateHealthStatus called with (stringified):', JSON.stringify(healthStatus, null, 2));
+            
+            // Fetch current load balancers to update their status
+            fetchLoadBalancers().then((loadbalancers) => {
+                if (!loadbalancers || loadbalancers.length === 0) {
+                    console.log('No load balancers available yet');
+                    return;
+                }
+                console.log('Fetched load balancers (stringified):', JSON.stringify(loadbalancers, null, 2));
+                
+                // Update the UI with the new data
+                updateLoadBalancersList(loadbalancers);
+            }).catch(error => {
+                console.error('Error fetching load balancers:', error);
+            });
         }
 
         function updateLoadBalancersList(loadbalancers) {
             const container = document.getElementById('loadbalancers-list');
             container.innerHTML = '';
             
-            if (!Array.isArray(loadbalancers)) {
-                console.error('Expected array of loadbalancers, got:', loadbalancers);
-                return;
-            }
-
             loadbalancers.forEach(lb => {
+                console.log('Processing load balancer (stringified):', JSON.stringify(lb, null, 2));
                 const healthStatus = getHealthStatus(lb.healthStatus);
+                const hostsHtml = lb.hosts && lb.hosts.length > 0 
+                    ? lb.hosts.map(host => {
+                        const hostStatus = lb.healthStatus[host];
+                        console.log(`Raw host status for ${host} (stringified):`, JSON.stringify(hostStatus, null, 2));
+                        const isHealthy = hostStatus?.isHealthy === true;
+                        console.log(`Host ${host} isHealthy (${typeof isHealthy}):`, isHealthy);
+                        const lastChecked = hostStatus?.lastChecked 
+                            ? new Date(hostStatus.lastChecked).toLocaleString()
+                            : 'Never';
+                        const nextCheck = hostStatus?.nextCheck
+                            ? new Date(hostStatus.nextCheck).toLocaleString()
+                            : 'Unknown';
+                        
+                        return `
+                            <div class="host-status">
+                                <div class="host-info">
+                                    <span class="status-indicator ${isHealthy ? 'healthy' : 'unhealthy'}"></span>
+                                    <span class="host-name">${host}</span>
+                                </div>
+                                <div class="host-details" title="Last checked: ${lastChecked}&#13;Next check: ${nextCheck}">
+                                    <span class="status-message">${isHealthy ? 'Healthy' : 'Unhealthy'}</span>
+                                    <span class="last-check">Last check: ${lastChecked}</span>
+                                    <span class="next-check">Next check: ${nextCheck}</span>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')
+                    : 'No hosts configured';
+
                 const card = document.createElement('div');
                 card.className = 'load-balancer-card';
                 card.innerHTML = `
@@ -553,13 +598,7 @@
                         </div>
                     </div>
                     <div class="hosts">
-                        ${lb.hosts && lb.hosts.length > 0 
-                            ? lb.hosts.map(host => `
-                                <div class="host-status ${lb.healthStatus?.[host] ? 'healthy' : 'unhealthy'}">
-                                    ${host}: ${lb.healthStatus?.[host] ? '✅' : '❌'}
-                                </div>
-                            `).join('')
-                            : 'No hosts configured'}
+                        ${hostsHtml}
                     </div>
                     <div class="deployment-status">
                         <h4>Deployment Status:</h4>
@@ -610,95 +649,67 @@
         }
 
         function connectWebSocket() {
+            if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
+                console.log('WebSocket already connected or connecting');
+                return;
+            }
+
+            console.log('=== Attempting WebSocket Connection ===');
             socket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/ws`);
             
             socket.addEventListener('open', () => {
-                console.log('WebSocket connected');
+                console.log('=== WebSocket Connected Successfully ===');
+                reconnectAttempts = 0;
             });
 
             socket.addEventListener('message', (event) => {
-                const data = JSON.parse(event.data);
-                
-                switch (data.type) {
+                const message = JSON.parse(event.data);
+                console.log('=== WebSocket Message Received ===', message);
+
+                // Handle ping messages
+                if (message.type === 'ping') {
+                    socket.send(JSON.stringify({ type: 'pong' }));
+                    return;
+                }
+
+                switch (message.type) {
+                    case 'loadBalancersUpdate':
+                        console.log('Processing load balancers update');
+                        updateLoadBalancersList(message.loadBalancers);
+                        break;
+                    case 'initialHealthStatus':
+                        console.log('Processing initial health status');
+                        updateHealthStatus(message.healthStatus);
+                        break;
                     case 'healthStatusUpdate':
-                        updateHealthStatus(data.healthStatus);
+                        console.log('Processing health status update');
+                        updateHealthStatus(message.healthStatus);
                         break;
-                        
                     case 'configUpdate':
-                        fetchLoadBalancers(); // Refresh the list when config changes
+                        console.log('Processing config update');
+                        fetchLoadBalancers().then(loadbalancers => {
+                            console.log('Updated load balancers:', loadbalancers);
+                            updateLoadBalancersList(loadbalancers);
+                        });
                         break;
-                        
-                    case 'workflowStatus':
-                        if (data.workflowStatus) {
-                            updateWorkflowStatus(
-                                data.workflowStatus.loadBalancerName,
-                                data.workflowStatus
-                            );
-                        }
-                        break;
-                        
-                    default:
-                        console.log('Unknown message type:', data.type);
                 }
             });
 
-            socket.addEventListener('close', () => {
-                console.log('WebSocket disconnected, attempting to reconnect...');
-                setTimeout(connectWebSocket, 1000);
+            socket.addEventListener('close', (event) => {
+                console.log('=== WebSocket Disconnected ===', event);
+                if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
+                    console.log(`Attempting to reconnect in ${delay}ms... (Attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+                    setTimeout(connectWebSocket, delay);
+                    reconnectAttempts++;
+                } else {
+                    console.error('Max reconnection attempts reached. Please refresh the page.');
+                    alert('Lost connection to server. Please refresh the page.');
+                }
             });
 
             socket.addEventListener('error', (error) => {
-                console.error('WebSocket error:', error);
-            });
-        }
-
-        function updateHealthStatus(healthStatus) {
-            const cards = document.querySelectorAll('.load-balancer-card');
-            cards.forEach(card => {
-                const hostStatuses = card.querySelectorAll('.host-status');
-                hostStatuses.forEach(hostStatus => {
-                    const hostName = hostStatus.querySelector('.host-name').textContent;
-                    const indicator = hostStatus.querySelector('.status-indicator');
-                    const lastCheck = hostStatus.querySelector('.last-check');
-                    const nextCheck = hostStatus.querySelector('.next-check');
-                    const statusMessage = hostStatus.querySelector('.status-message');
-                    
-                    if (hostName in healthStatus) {
-                        // Update status indicator
-                        indicator.className = `status-indicator ${healthStatus[hostName].isHealthy ? 'healthy' : 'unhealthy'}`;
-                        
-                        // Update last check time
-                        const now = new Date();
-                        lastCheck.textContent = `Last check: ${now.toLocaleTimeString()}`;
-                        
-                        // Calculate and show next check time
-                        const probeInterval = parseInt(card.querySelector('.probe-interval').textContent);
-                        const nextCheckTime = new Date(now.getTime() + (probeInterval * 1000));
-                        nextCheck.textContent = `Next check in: ${probeInterval} seconds`;
-                        
-                        // Start a countdown timer for next check
-                        const timerId = setInterval(() => {
-                            const remaining = Math.round((nextCheckTime - new Date()) / 1000);
-                            if (remaining > 0) {
-                                nextCheck.textContent = `Next check in: ${remaining} seconds`;
-                            } else {
-                                clearInterval(timerId);
-                                nextCheck.textContent = 'Check pending...';
-                            }
-                        }, 1000);
-                        
-                        // Store timer ID to clear it on next update
-                        if (hostStatus.dataset.timerId) {
-                            clearInterval(parseInt(hostStatus.dataset.timerId));
-                        }
-                        hostStatus.dataset.timerId = timerId.toString();
-                        
-                        // Update status message if available
-                        if (healthStatus[hostName].message) {
-                            statusMessage.textContent = healthStatus[hostName].message;
-                        }
-                    }
-                });
+                console.error('=== WebSocket Error ===', error);
             });
         }
 
@@ -759,11 +770,12 @@
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
-                const loadbalancers = await response.json();
-                // Update your UI with the loadbalancers data
-                updateLoadBalancersList(loadbalancers);
+                const data = await response.json();
+                console.log('Fetched load balancers data:', data);
+                return data;
             } catch (error) {
-                console.error('Failed to fetch load balancers:', error);
+                console.error('Error fetching load balancers:', error);
+                return [];
             }
         }
 
@@ -799,25 +811,28 @@
         }
 
         async function deleteLoadBalancer(name) {
-            const confirmed = await showConfirmDialog(`Are you sure you want to delete the load balancer "${name}"?`);
-            
-            if (!confirmed) {
-                return;
-            }
-
-            try {
-                const response = await fetch(`/api/loadbalancer/${name}`, {
-                    method: 'DELETE'
-                });
-
-                if (response.ok) {
-                    await fetchLoadBalancers(); // Refresh the list
-                } else {
-                    throw new Error(`Failed to delete load balancer: ${response.statusText}`);
+            if (await showConfirmDialog(`Are you sure you want to delete "${name}"?`)) {
+                try {
+                    console.log(`Deleting load balancer: ${name}`);
+                    const response = await fetch(`/api/loadbalancer/${encodeURIComponent(name)}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    // Update the UI with the new list from the response
+                    const data = await response.json();
+                    if (data.success && data.loadBalancers) {
+                        updateLoadBalancersList(data.loadBalancers);
+                    }
+                    
+                    console.log('Load balancer deleted successfully');
+                } catch (error) {
+                    console.error('Error deleting load balancer:', error);
+                    alert('Failed to delete load balancer');
                 }
-            } catch (error) {
-                console.error('Error:', error);
-                alert('Failed to delete load balancer: ' + error.message);
             }
         }
 
@@ -1103,8 +1118,9 @@
             }
         }
 
-        // Start connection when page loads
-        window.addEventListener('load', () => {
+        // Call connectWebSocket when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('Page loaded, establishing WebSocket connection');
             connectWebSocket();
             fetchLoadBalancers(); // Fetch load balancers on load
         });

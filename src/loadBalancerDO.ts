@@ -15,7 +15,14 @@ interface LoadBalancerConfig {
 }
 
 interface HealthStatus {
-	[host: string]: boolean;
+	[loadBalancerName: string]: {
+		[host: string]: {
+			isHealthy: boolean;
+			lastChecked: number;
+			nextCheck: number;
+			workflowId?: string;
+		}
+	}
 }
 
 interface LoadBalancerSnippet {
@@ -56,6 +63,7 @@ interface HealthStatusUpdate {
 	endpoint: string;
 	isHealthy: boolean;
 	timestamp: number;
+	loadBalancerName: string;
 }
 
 export class LoadBalancerDO implements DurableObject {
@@ -247,36 +255,28 @@ export class LoadBalancerDO implements DurableObject {
 			console.log('Received health status update:', update);
 			
 			// Get current health status
-			const currentStatus: HealthStatus = await this.ctx.storage.get('healthStatus') || {};
-			const previousHealth = currentStatus[update.endpoint];
+			let healthStatus = await this.ctx.storage.get('healthStatus') || {};
 			
-			console.log('Previous health status:', {
-				endpoint: update.endpoint,
-				previousHealth,
-				newHealth: update.isHealthy
-			});
+			// Initialize the nested structure if it doesn't exist
+			if (!healthStatus[update.loadBalancerName]) {
+				healthStatus[update.loadBalancerName] = {};
+			}
 			
-			// Update health status
-			currentStatus[update.endpoint] = update.isHealthy;
-			await this.ctx.storage.put('healthStatus', currentStatus);
+			// Update the health status for this specific host
+			healthStatus[update.loadBalancerName][update.endpoint] = {
+				...healthStatus[update.loadBalancerName][update.endpoint], // Preserve existing data like workflowId
+				isHealthy: update.isHealthy,
+				lastChecked: update.timestamp,
+				nextCheck: update.timestamp + (30 * 1000) // Default to 30 seconds if no config available
+			};
+			
+			console.log('Updated health status:', healthStatus);
+			
+			// Store the updated status
+			await this.ctx.storage.put('healthStatus', healthStatus);
 			
 			// Broadcast the update
-			this.broadcastHealthStatus(currentStatus);
-			
-			// If health status changed, trigger snippet redeployment
-			if (previousHealth !== update.isHealthy) {
-				console.log(`Health status changed for ${update.endpoint}, triggering redeployment`);
-				// Get the current config before deploying
-				const currentConfig = await this.ctx.storage.get('config') as LoadBalancerConfig;
-				if (!currentConfig) {
-					console.error('No config found for redeployment');
-					return new Response(JSON.stringify({ 
-						success: false,
-						error: 'No config found for redeployment'
-					}));
-				}
-				await this.deploySnippet(currentConfig);
-			}
+			this.broadcastHealthStatus(healthStatus);
 			
 			return new Response(JSON.stringify({ success: true }));
 		}
@@ -286,34 +286,134 @@ export class LoadBalancerDO implements DurableObject {
 			return new Response('OK');
 		}
 
+		if (url.pathname === '/api/health-status' && request.method === 'GET') {
+			const healthStatus = await this.ctx.storage.get('healthStatus') || {};
+			console.log('GET /api/health-status returning (stringified):', JSON.stringify(healthStatus, null, 2));
+			return new Response(JSON.stringify(healthStatus), {
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
+
+		if (url.pathname === '/api/debug/health-status' && request.method === 'GET') {
+			const healthStatus = await this.ctx.storage.get('healthStatus');
+			console.log('DEBUG - Current health status:', JSON.stringify(healthStatus, null, 2));
+			return new Response(JSON.stringify(healthStatus), {
+				status: 200,
+				headers: { 
+					'Content-Type': 'application/json',
+					'Cache-Control': 'no-cache'
+				}
+			});
+		}
+
+		if (url.pathname === '/api/loadbalancer/delete' && request.method === 'DELETE') {
+			console.log('=== Processing Delete Request ===');
+			
+			// Clear the alarm first
+			await this.ctx.storage.deleteAlarm();
+			console.log('Alarm cleared');
+			
+			// Clear health status and config
+			const healthStatus = await this.ctx.storage.get('healthStatus') || {};
+			const config = await this.ctx.storage.get('config');
+			
+			if (config) {
+				console.log(`Deleting health status for ${config.name}`);
+				delete healthStatus[config.name];
+				await this.ctx.storage.put('healthStatus', healthStatus);
+			}
+			
+			// Clear config
+			await this.ctx.storage.delete('config');
+			
+			return new Response(JSON.stringify({ success: true }));
+		}
+
+		// Add new endpoint to handle broadcasts from registry
+		if (url.pathname === '/api/broadcast-update' && request.method === 'POST') {
+			const { loadBalancers } = await request.json();
+			this.broadcastConfigUpdate({ type: 'loadBalancersUpdate', loadBalancers });
+			return new Response(JSON.stringify({ success: true }));
+		}
+
+		if (url.pathname === '/api/ws') {
+			if (request.headers.get('Upgrade') !== 'websocket') {
+				return new Response('Expected WebSocket', { status: 400 });
+			}
+
+			console.log('=== WebSocket Connection Request ===');
+			const pair = new WebSocketPair();
+			const [client, server] = Object.values(pair);
+
+			await this.handleWebSocket(server);
+
+			return new Response(null, {
+				status: 101,
+				webSocket: client
+			});
+		}
+
 		return new Response('Not found', { status: 404 });
 	}
 
 	private async handleWebSocket(webSocket: WebSocket) {
+		console.log('=== New WebSocket Connection ===');
 		webSocket.accept();
 
 		// Add to sessions
-		this.sessions.push(webSocket);
+		this.sessions = this.sessions.filter(ws => {
+			try {
+				// Test if the connection is still alive
+				ws.send(JSON.stringify({ type: 'ping' }));
+				return true;
+			} catch {
+				console.log('Removing dead WebSocket connection');
+				return false;
+			}
+		});
 
-		// Send initial health status
-		const healthStatus = await this.checkHealth();
-		webSocket.send(JSON.stringify({
+		this.sessions.push(webSocket);
+		console.log(`Active WebSocket sessions after cleanup: ${this.sessions.length}`);
+
+		// Send initial health status from storage
+		const healthStatus = await this.ctx.storage.get('healthStatus') || {};
+		const initialMessage = JSON.stringify({
 			type: 'initialHealthStatus',
 			healthStatus
-		}));
+		});
+		console.log('Sending initial health status to new connection');
+		webSocket.send(initialMessage);
 
-		// Start health check interval if not already started
-		if (!this.healthCheckInterval) {
-			this.startHealthChecks();
-		}
+		// Add ping/pong to keep connection alive
+		const pingInterval = setInterval(() => {
+			try {
+				webSocket.send(JSON.stringify({ type: 'ping' }));
+			} catch (error) {
+				console.error('Failed to send ping, closing connection');
+				clearInterval(pingInterval);
+				this.sessions = this.sessions.filter(ws => ws !== webSocket);
+				console.log(`Sessions after ping failure: ${this.sessions.length}`);
+			}
+		}, 30000); // Ping every 30 seconds
 
 		// Handle WebSocket closure
 		webSocket.addEventListener('close', () => {
+			console.log('=== WebSocket Connection Closed ===');
+			clearInterval(pingInterval);
 			this.sessions = this.sessions.filter(ws => ws !== webSocket);
+			console.log(`Remaining WebSocket sessions: ${this.sessions.length}`);
 		});
 
-		webSocket.addEventListener('error', () => {
-			this.sessions = this.sessions.filter(ws => ws !== webSocket);
+		// Handle messages from client
+		webSocket.addEventListener('message', (message) => {
+			try {
+				const data = JSON.parse(message.data);
+				if (data.type === 'pong') {
+					console.log('Received pong from client');
+				}
+			} catch (error) {
+				console.error('Error handling WebSocket message:', error);
+			}
 		});
 	}
 
@@ -326,19 +426,33 @@ export class LoadBalancerDO implements DurableObject {
 	}
 
 	private async checkHealth(): Promise<HealthStatus> {
+		const config = await this.ctx.storage.get('config') as LoadBalancerConfig;
 		const healthStatus: HealthStatus = {};
-		for (const host of this.config.hosts) {
+		
+		// Initialize this load balancer's health status
+		healthStatus[config.name] = {};
+		
+		for (const host of config.hosts) {
 			try {
-				const response = await fetch(`http://${host}${this.config.healthCheckConfig.probePath}`);
-				healthStatus[host] = response.ok;
+				const response = await fetch(`http://${host}${config.healthCheckConfig.probePath}`);
+				healthStatus[config.name][host] = {
+					isHealthy: response.ok,
+					lastChecked: Date.now(),
+					nextCheck: Date.now() + (config.healthCheckConfig.probeInterval * 1000)
+				};
 			} catch (error) {
-				healthStatus[host] = false;
+				healthStatus[config.name][host] = {
+					isHealthy: false,
+					lastChecked: Date.now(),
+					nextCheck: Date.now() + (config.healthCheckConfig.probeInterval * 1000)
+				};
 			}
 		}
 		return healthStatus;
 	}
 
 	private broadcastHealthStatus(healthStatus: HealthStatus) {
+		console.log('Broadcasting health status:', healthStatus);
 		const message = JSON.stringify({
 			type: 'healthStatusUpdate',
 			healthStatus
@@ -348,26 +462,32 @@ export class LoadBalancerDO implements DurableObject {
 			try {
 				ws.send(message);
 				return true;
-			} catch {
+			} catch (error) {
+				console.error('Failed to send health status update:', error);
 				return false;
 			}
 		});
 	}
 
-	private broadcastConfigUpdate(config: LoadBalancerConfig) {
+	private broadcastConfigUpdate(config: LoadBalancerConfig | null) {
+		console.log('Broadcasting config update:', config);
 		const message = JSON.stringify({
 			type: 'configUpdate',
 			config
 		});
 
+		let successCount = 0;
 		this.sessions = this.sessions.filter(ws => {
 			try {
 				ws.send(message);
+				successCount++;
 				return true;
-			} catch {
+			} catch (error) {
+				console.error('Failed to send config update:', error);
 				return false;
 			}
 		});
+		console.log(`Config update broadcast to ${successCount} clients`);
 	}
 
 	private generateSnippet(config: LoadBalancerConfig): LoadBalancerSnippet {
@@ -564,13 +684,11 @@ export default {
 			workflowStatus
 		};
 
-		this.sessions = this.sessions.filter(ws => {
+		this.sessions.forEach(ws => {
 			try {
 				ws.send(JSON.stringify(message));
-				return true;
 			} catch (error) {
 				console.error('Failed to send WebSocket message:', error);
-				return false;
 			}
 		});
 	}
@@ -644,9 +762,16 @@ export default {
 			console.log('No hosts configured, skipping health checks');
 			return;
 		}
-		
-		console.log(`Found ${config.hosts.length} hosts to check:`, config.hosts);
 
+		// Get current health status
+		let healthStatus = await this.ctx.storage.get('healthStatus') || {};
+		console.log('Current health status:', healthStatus);
+		
+		// Initialize this load balancer's health status if not exists
+		if (!healthStatus[config.name]) {
+			healthStatus[config.name] = {};
+		}
+		
 		// Schedule the next alarm first
 		await this.scheduleNextHealthCheck();
 
@@ -665,10 +790,23 @@ export default {
 					workflowId: workflow.id,
 					probePath: config.healthCheckConfig.probePath
 				});
+
+				// Store the workflow ID in the nested structure
+				healthStatus[config.name][host] = {
+					...healthStatus[config.name][host],  // Preserve existing health status
+					workflowId: workflow.id,
+					nextCheck: Date.now() + (config.healthCheckConfig.probeInterval * 1000),
+					// Add default health status if not present
+					isHealthy: healthStatus[config.name]?.[host]?.isHealthy ?? false,
+					lastChecked: healthStatus[config.name]?.[host]?.lastChecked ?? Date.now()
+				};
 			} catch (error) {
 				console.error(`Failed to create monitoring workflow for ${host}:`, error);
 			}
 		}
+
+		// Store updated health status
+		await this.ctx.storage.put('healthStatus', healthStatus);
 		
 		console.log('=== Health Checks Started ===');
 	}
@@ -698,16 +836,36 @@ export default {
 		this.config = newConfig;
 		await this.ctx.storage.put('config', newConfig);
 		
-		// Get current alarm
+		// Clear existing health status for removed hosts
+		const healthStatus = await this.ctx.storage.get('healthStatus') || {};
+		
+		// Initialize or update health status for this load balancer
+		healthStatus[newConfig.name] = healthStatus[newConfig.name] || {};
+		const updatedHealthStatus = {};
+		updatedHealthStatus[newConfig.name] = {};
+		
+		newConfig.hosts.forEach(host => {
+			if (healthStatus[newConfig.name]?.[host]) {
+				updatedHealthStatus[newConfig.name][host] = healthStatus[newConfig.name][host];
+			}
+		});
+		
+		await this.ctx.storage.put('healthStatus', updatedHealthStatus);
+		
+		// Broadcast both config and health status updates
+		this.broadcastConfigUpdate(newConfig);
+		this.broadcastHealthStatus(updatedHealthStatus);
+		
+		// Ensure health checks are running
 		const currentAlarm = await this.ctx.storage.getAlarm();
-		console.log('Current alarm:', currentAlarm ? new Date(currentAlarm) : 'None');
-		
-		// Schedule next check
-		await this.scheduleNextHealthCheck();
-		
-		// Verify alarm was set
-		const newAlarm = await this.ctx.storage.getAlarm();
-		console.log('New alarm set for:', newAlarm ? new Date(newAlarm) : 'None');
+		if (!currentAlarm) {
+			console.log('No existing alarm found, triggering immediate health check');
+			await this.handleAlarm();
+		} else {
+			console.log('Existing alarm found for:', new Date(currentAlarm));
+			// Schedule next check
+			await this.scheduleNextHealthCheck();
+		}
 		
 		console.log('=== Config Update Complete ===');
 	}

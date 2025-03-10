@@ -25,6 +25,15 @@ interface WorkflowNamespace {
 interface Env {
     DEPLOY_SNIPPET_WORKFLOW: WorkflowNamespace;
     MONITOR_ENDPOINT_WORKFLOW: WorkflowNamespace;
+    LOAD_BALANCER: DurableObjectNamespace;
+    LOADBALANCER_REGISTRY: DurableObjectNamespace;
+}
+
+interface HealthStatusUpdate {
+    endpoint: string;
+    loadBalancerName: string;
+    isHealthy: boolean;
+    timestamp: number;
 }
 
 declare module 'cloudflare:workers' {
