@@ -51,6 +51,13 @@ interface WebSocketMessage {
 	};
 }
 
+// Add to your existing interfaces
+interface HealthStatusUpdate {
+	endpoint: string;
+	isHealthy: boolean;
+	timestamp: number;
+}
+
 export class LoadBalancerDO implements DurableObject {
 	private ctx: DurableObjectState;
 	private config: LoadBalancerConfig;
@@ -75,6 +82,14 @@ export class LoadBalancerDO implements DurableObject {
 			},
 			expression: {}
 		};
+
+		// Set up initial alarm
+		this.ctx.blockConcurrencyWhile(async () => {
+			const alarm = await this.ctx.storage.getAlarm();
+			if (!alarm) {
+				await this.scheduleNextHealthCheck();
+			}
+		});
 	}
 
 	async fetch(request: Request) {
@@ -113,8 +128,7 @@ export class LoadBalancerDO implements DurableObject {
 		if (request.method === 'POST' && url.pathname === '/api/loadbalancer') {
 			const newConfig = await request.json() as LoadBalancerConfig;
 			
-			await this.ctx.storage.put('config', newConfig);
-			this.config = newConfig;
+			await this.updateConfig(newConfig);
 
 			// Register with the registry
 			const registryId = this.env.LOADBALANCER_REGISTRY.idFromName('default');
@@ -152,6 +166,7 @@ export class LoadBalancerDO implements DurableObject {
 		}
 
 		if (request.method === 'GET' && url.pathname === '/api/loadbalancer') {
+			await this.ensureAlarmAndMonitoring();
 			return new Response(JSON.stringify(this.config), { status: 200 });
 		}
 
@@ -225,6 +240,50 @@ export class LoadBalancerDO implements DurableObject {
 			const status = await request.json();
 			this.broadcastWorkflowStatus(status);
 			return new Response(JSON.stringify({ success: true }));
+		}
+
+		if (url.pathname === '/api/health-status/update' && request.method === 'POST') {
+			const update = await request.json() as HealthStatusUpdate;
+			console.log('Received health status update:', update);
+			
+			// Get current health status
+			const currentStatus: HealthStatus = await this.ctx.storage.get('healthStatus') || {};
+			const previousHealth = currentStatus[update.endpoint];
+			
+			console.log('Previous health status:', {
+				endpoint: update.endpoint,
+				previousHealth,
+				newHealth: update.isHealthy
+			});
+			
+			// Update health status
+			currentStatus[update.endpoint] = update.isHealthy;
+			await this.ctx.storage.put('healthStatus', currentStatus);
+			
+			// Broadcast the update
+			this.broadcastHealthStatus(currentStatus);
+			
+			// If health status changed, trigger snippet redeployment
+			if (previousHealth !== update.isHealthy) {
+				console.log(`Health status changed for ${update.endpoint}, triggering redeployment`);
+				// Get the current config before deploying
+				const currentConfig = await this.ctx.storage.get('config') as LoadBalancerConfig;
+				if (!currentConfig) {
+					console.error('No config found for redeployment');
+					return new Response(JSON.stringify({ 
+						success: false,
+						error: 'No config found for redeployment'
+					}));
+				}
+				await this.deploySnippet(currentConfig);
+			}
+			
+			return new Response(JSON.stringify({ success: true }));
+		}
+
+		if (url.pathname === '/api/alarm' && request.method === 'POST') {
+			await this.alarm();
+			return new Response('OK');
 		}
 
 		return new Response('Not found', { status: 404 });
@@ -402,6 +461,7 @@ export default {
 
 		try {
 			console.log('Starting deployment workflow for:', config.name);
+			console.log('Using config:', config);
 			console.log('Workflow binding:', this.env.DEPLOY_SNIPPET_WORKFLOW);
 			
 			// Create a new workflow instance
@@ -573,5 +633,107 @@ export default {
 				console.error('Error sending workflow update:', error);
 			}
 		});
+	}
+
+	private async handleAlarm() {
+		console.log('=== Starting Health Checks ===');
+		
+		// Get the current config from storage
+		const config = await this.ctx.storage.get('config') as LoadBalancerConfig;
+		if (!config || !config.hosts || config.hosts.length === 0) {
+			console.log('No hosts configured, skipping health checks');
+			return;
+		}
+		
+		console.log(`Found ${config.hosts.length} hosts to check:`, config.hosts);
+
+		// Schedule the next alarm first
+		await this.scheduleNextHealthCheck();
+
+		// Start monitoring workflows for each endpoint
+		for (const host of config.hosts) {
+			try {
+				console.log(`\nStarting check for host: ${host}`);
+				const workflow = await this.env.MONITOR_ENDPOINT_WORKFLOW.create({
+					params: {
+						loadBalancerName: config.name,
+						endpoint: host,
+						probePath: config.healthCheckConfig.probePath
+					}
+				});
+				console.log(`Monitoring workflow created for ${host}`, {
+					workflowId: workflow.id,
+					probePath: config.healthCheckConfig.probePath
+				});
+			} catch (error) {
+				console.error(`Failed to create monitoring workflow for ${host}:`, error);
+			}
+		}
+		
+		console.log('=== Health Checks Started ===');
+	}
+
+	private async scheduleNextHealthCheck() {
+		const interval = this.config.healthCheckConfig.probeInterval;
+		const nextCheck = Date.now() + (interval * 1000);
+		
+		console.log('=== Scheduling Health Check ===');
+		console.log(`Current time: ${new Date()}`);
+		console.log(`Next check scheduled for: ${new Date(nextCheck)}`);
+		console.log(`Interval: ${interval} seconds`);
+		
+		await this.ctx.storage.put('nextCheck', nextCheck);
+		await this.ctx.storage.setAlarm(nextCheck);
+		
+		// Verify alarm was set
+		const alarm = await this.ctx.storage.getAlarm();
+		console.log('Alarm verification:', alarm ? new Date(alarm) : 'No alarm set');
+		console.log('=== Health Check Scheduled ===');
+	}
+
+	private async updateConfig(newConfig: LoadBalancerConfig) {
+		console.log('=== Starting Config Update ===');
+		console.log('New config:', newConfig);
+		
+		this.config = newConfig;
+		await this.ctx.storage.put('config', newConfig);
+		
+		// Get current alarm
+		const currentAlarm = await this.ctx.storage.getAlarm();
+		console.log('Current alarm:', currentAlarm ? new Date(currentAlarm) : 'None');
+		
+		// Schedule next check
+		await this.scheduleNextHealthCheck();
+		
+		// Verify alarm was set
+		const newAlarm = await this.ctx.storage.getAlarm();
+		console.log('New alarm set for:', newAlarm ? new Date(newAlarm) : 'None');
+		
+		console.log('=== Config Update Complete ===');
+	}
+
+	// Add the alarm handler method
+	async alarm() {
+		console.log('\n=== ALARM TRIGGERED ===');
+		console.log('Time:', new Date());
+		console.log('Load Balancer:', this.config.name);
+		await this.handleAlarm();
+		console.log('=== ALARM COMPLETE ===\n');
+	}
+
+	private async ensureAlarmAndMonitoring() {
+		console.log('=== Ensuring Alarm and Monitoring ===');
+		
+		// Get current alarm
+		const alarm = await this.ctx.storage.getAlarm();
+		if (!alarm) {
+			console.log('No alarm found, scheduling health check');
+			await this.scheduleNextHealthCheck();
+			
+			// Start immediate health check
+			await this.handleAlarm();
+		} else {
+			console.log('Existing alarm found for:', new Date(alarm));
+		}
 	}
 } 

@@ -135,10 +135,58 @@
         }
 
         .host-status {
-            margin: 0.5rem 0;
-            padding: 0.5rem;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
             border-radius: 0.375rem;
+            padding: 0.75rem;
+            margin: 0.5rem 0;
+        }
+
+        .host-info {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-indicator {
+            width: 0.75rem;
+            height: 0.75rem;
+            border-radius: 50%;
+            background: var(--gray);
+        }
+
+        .status-indicator.healthy {
+            background: var(--success);
+        }
+
+        .status-indicator.unhealthy {
+            background: var(--danger);
+        }
+
+        .host-name {
+            font-family: monospace;
             font-size: 0.875rem;
+        }
+
+        .host-details {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+            margin-top: 0.5rem;
+            font-size: 0.75rem;
+            color: var(--gray);
+        }
+
+        .status-message {
+            font-weight: 500;
+        }
+
+        .next-check {
+            font-style: italic;
+        }
+
+        .last-check {
+            font-style: italic;
         }
 
         .actions {
@@ -302,9 +350,104 @@
             color: var(--text-muted);
             margin-left: auto;
         }
+
+        .endpoints-section {
+            margin: 1rem 0;
+        }
+
+        .endpoints-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 0.75rem;
+            margin-top: 0.5rem;
+        }
+
+        .endpoint-card {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 0.375rem;
+            padding: 0.75rem;
+            position: relative;
+        }
+
+        .endpoint-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .status-indicator {
+            width: 0.75rem;
+            height: 0.75rem;
+            border-radius: 50%;
+        }
+
+        .status-healthy {
+            background: var(--success);
+        }
+
+        .status-unhealthy {
+            background: var(--danger);
+        }
+
+        .status-unknown {
+            background: var(--gray);
+        }
+
+        .endpoint-url {
+            font-family: monospace;
+            font-size: 0.875rem;
+            word-break: break-all;
+        }
+
+        .endpoint-details {
+            font-size: 0.75rem;
+            color: var(--gray);
+            margin-top: 0.5rem;
+        }
+
+        .config-section {
+            margin: 1rem 0;
+            padding: 0.75rem;
+            background: #f8fafc;
+            border-radius: 0.375rem;
+        }
+
+        .config-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+        }
+
+        .expression-section {
+            margin-top: 1rem;
+        }
+
+        .expression-rules {
+            background: #f8fafc;
+            padding: 0.75rem;
+            border-radius: 0.375rem;
+        }
+
+        .rule-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+        }
+
+        .label {
+            color: var(--gray);
+            font-size: 0.875rem;
+        }
+
+        .value {
+            font-weight: 500;
+        }
     </style>
     <script>
         let currentLoadBalancer = null;
+        let socket;
 
         function showModal(type = 'create', loadBalancer = null) {
             currentLoadBalancer = loadBalancer;
@@ -467,80 +610,96 @@
         }
 
         function connectWebSocket() {
-            console.log('Attempting WebSocket connection...');
-            const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
+            socket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/ws`);
+            
+            socket.addEventListener('open', () => {
+                console.log('WebSocket connected');
+            });
 
-            ws.onopen = () => {
-                console.log('WebSocket connection established');
-            };
-
-            ws.onmessage = (event) => {
-                const rawData = event.data;
-                console.log('Raw WebSocket message received:', rawData);
+            socket.addEventListener('message', (event) => {
+                const data = JSON.parse(event.data);
                 
-                try {
-                    const data = JSON.parse(rawData);
-                    console.log('Parsed WebSocket message:', data);
-                    
-                    switch (data.type) {
-                        case 'initialHealthStatus':
-                            console.log('Handling initial health status');
-                            updateHealthStatusUI(data.healthStatus);
-                            break;
-                        case 'healthStatusUpdate':
-                            console.log('Handling health status update');
-                            updateHealthStatusUI(data.healthStatus);
-                            break;
-                        case 'configUpdate':
-                            console.log('Handling config update');
-                            updateConfigUI(data.config);
-                            break;
-                        case 'workflowStatus':
-                            console.log('Handling workflow status update:', data.workflowStatus);
-                            handleWorkflowStatus(data.workflowStatus);
-                            break;
-                        default:
-                            console.warn('Unknown message type:', data.type);
-                    }
-                } catch (error) {
-                    console.error('Error processing WebSocket message:', error);
-                    console.error('Raw message was:', rawData);
+                switch (data.type) {
+                    case 'healthStatusUpdate':
+                        updateHealthStatus(data.healthStatus);
+                        break;
+                        
+                    case 'configUpdate':
+                        fetchLoadBalancers(); // Refresh the list when config changes
+                        break;
+                        
+                    case 'workflowStatus':
+                        if (data.workflowStatus) {
+                            updateWorkflowStatus(
+                                data.workflowStatus.loadBalancerName,
+                                data.workflowStatus
+                            );
+                        }
+                        break;
+                        
+                    default:
+                        console.log('Unknown message type:', data.type);
                 }
-            };
+            });
 
-            ws.onerror = (error) => {
+            socket.addEventListener('close', () => {
+                console.log('WebSocket disconnected, attempting to reconnect...');
+                setTimeout(connectWebSocket, 1000);
+            });
+
+            socket.addEventListener('error', (error) => {
                 console.error('WebSocket error:', error);
-            };
-
-            ws.onclose = (event) => {
-                console.warn('WebSocket closed:', event.code, event.reason);
-                console.log('Attempting to reconnect in 5 seconds...');
-                setTimeout(connectWebSocket, 5000);
-            };
-
-            // Store the WebSocket instance globally for debugging
-            window.debugWebSocket = ws;
+            });
         }
 
-        function updateHealthStatusUI(healthStatus) {
-            const statusDiv = document.getElementById('health-status');
-            if (!statusDiv) {
-                console.warn('Health status div not found');
-                return;
-            }
-
-            let html = '<h2>Health Status</h2>';
-            if (Object.keys(healthStatus).length === 0) {
-                html += '<div class="host-status">No health status available</div>';
-            } else {
-                for (const [host, status] of Object.entries(healthStatus)) {
-                    const statusClass = status ? 'healthy' : 'unhealthy';
-                    html += `<div class="host-status ${statusClass}">
-                        <span>${host}</span>: ${status ? '✅ Healthy' : '❌ Unhealthy'}
-                    </div>`;
-                }
-            }
-            statusDiv.innerHTML = html;
+        function updateHealthStatus(healthStatus) {
+            const cards = document.querySelectorAll('.load-balancer-card');
+            cards.forEach(card => {
+                const hostStatuses = card.querySelectorAll('.host-status');
+                hostStatuses.forEach(hostStatus => {
+                    const hostName = hostStatus.querySelector('.host-name').textContent;
+                    const indicator = hostStatus.querySelector('.status-indicator');
+                    const lastCheck = hostStatus.querySelector('.last-check');
+                    const nextCheck = hostStatus.querySelector('.next-check');
+                    const statusMessage = hostStatus.querySelector('.status-message');
+                    
+                    if (hostName in healthStatus) {
+                        // Update status indicator
+                        indicator.className = `status-indicator ${healthStatus[hostName].isHealthy ? 'healthy' : 'unhealthy'}`;
+                        
+                        // Update last check time
+                        const now = new Date();
+                        lastCheck.textContent = `Last check: ${now.toLocaleTimeString()}`;
+                        
+                        // Calculate and show next check time
+                        const probeInterval = parseInt(card.querySelector('.probe-interval').textContent);
+                        const nextCheckTime = new Date(now.getTime() + (probeInterval * 1000));
+                        nextCheck.textContent = `Next check in: ${probeInterval} seconds`;
+                        
+                        // Start a countdown timer for next check
+                        const timerId = setInterval(() => {
+                            const remaining = Math.round((nextCheckTime - new Date()) / 1000);
+                            if (remaining > 0) {
+                                nextCheck.textContent = `Next check in: ${remaining} seconds`;
+                            } else {
+                                clearInterval(timerId);
+                                nextCheck.textContent = 'Check pending...';
+                            }
+                        }, 1000);
+                        
+                        // Store timer ID to clear it on next update
+                        if (hostStatus.dataset.timerId) {
+                            clearInterval(parseInt(hostStatus.dataset.timerId));
+                        }
+                        hostStatus.dataset.timerId = timerId.toString();
+                        
+                        // Update status message if available
+                        if (healthStatus[hostName].message) {
+                            statusMessage.textContent = healthStatus[hostName].message;
+                        }
+                    }
+                });
+            });
         }
 
         function updateConfigUI(config) {
@@ -860,6 +1019,90 @@
             }
         }
 
+        function updateWorkflowStatus(lbName, status) {
+            console.log('Processing workflow status:', status);
+            const statusId = `deployment-${lbName.replace(/[^a-z0-9]/gi, '_')}`;
+            const statusElement = document.getElementById(statusId);
+            if (!statusElement) {
+                console.warn('Status element not found:', statusId);
+                return;
+            }
+            
+            if (status.completed) {
+                console.log('Workflow completed, clearing status');
+                statusElement.innerHTML = '';
+                
+                // Update deploy button
+                const deployButton = document.querySelector(`button[onclick='deploySnippet("${lbName}")']`);
+                if (deployButton) {
+                    if (status.success) {
+                        deployButton.innerHTML = 'Deploy Snippet';
+                        deployButton.disabled = false;
+                    } else {
+                        deployButton.innerHTML = `Deploy Failed: ${status.error || 'Unknown error'}`;
+                        deployButton.disabled = false;
+                        setTimeout(() => {
+                            deployButton.innerHTML = 'Deploy Snippet';
+                        }, 5000);
+                    }
+                }
+
+                // Clear timer if workflow is completed
+                if (window.deploymentTimers?.[lbName]) {
+                    clearInterval(window.deploymentTimers[lbName].timerId);
+                    delete window.deploymentTimers[lbName];
+                }
+            } else {
+                // Start timer if it doesn't exist
+                if (!window.deploymentTimers) {
+                    window.deploymentTimers = {};
+                }
+                
+                if (!window.deploymentTimers[lbName]) {
+                    // Initial setup of status element
+                    statusElement.innerHTML = `
+                        <div class="deployment-progress">
+                            <span class="spinner"></span>
+                            <span class="step">${status.currentStep || 'Processing...'}</span>
+                            <span class="time">Started 0s ago</span>
+                        </div>
+                    `;
+
+                    const startTime = Date.now();
+                    window.deploymentTimers[lbName] = {
+                        startTime,
+                        timerId: setInterval(() => {
+                            if (statusElement) {
+                                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                                const timeElement = statusElement.querySelector('.time');
+                                if (timeElement) {
+                                    timeElement.textContent = `Started ${elapsed}s ago`;
+                                }
+                            }
+                        }, 1000)
+                    };
+                } else {
+                    // Just update the step text, leaving the timer untouched
+                    const stepElement = statusElement.querySelector('.step');
+                    if (stepElement) {
+                        stepElement.textContent = status.currentStep || 'Processing...';
+                    }
+                }
+                
+                // Update deploy button
+                const deployButton = document.querySelector(`button[onclick='deploySnippet("${lbName}")']`);
+                if (deployButton) {
+                    deployButton.disabled = true;
+                    deployButton.innerHTML = `
+                        <span class="button-content loading">
+                            <span class="spinner"></span>
+                            Deploying...
+                        </span>
+                    `;
+                }
+            }
+        }
+
         // Start connection when page loads
         window.addEventListener('load', () => {
             connectWebSocket();
@@ -874,11 +1117,6 @@
             <button class="btn btn-primary" onclick="showModal('create')">
                 Create Load Balancer
             </button>
-        </div>
-
-        <div id="health-status">
-            <h2>Health Status</h2>
-            <!-- Health status will be inserted here -->
         </div>
 
         <div class="load-balancer-grid" id="loadbalancers-list">

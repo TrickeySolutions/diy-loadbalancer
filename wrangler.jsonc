@@ -32,6 +32,11 @@
 			"name": "deploy-snippet",
 			"binding": "DEPLOY_SNIPPET_WORKFLOW",
 			"class_name": "DeploySnippetWorkflow"
+		},
+		{
+			"name": "monitor-endpoint",
+			"binding": "MONITOR_ENDPOINT_WORKFLOW",
+			"class_name": "MonitorEndpointWorkflow"
 		}
 	],
 	"vars": {

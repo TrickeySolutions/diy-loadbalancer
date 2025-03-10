@@ -1,6 +1,7 @@
 import { LoadBalancerDO } from './loadBalancerDO';
 import { LoadBalancerRegistryDO } from './loadBalancerRegistryDO';
 import { DeploySnippetWorkflow } from './workflows/deploySnippetWorkflow';
+import { MonitorEndpointWorkflow } from './workflows/monitorEndpointWorkflow';
 
 export interface Env {
 	LOAD_BALANCER: DurableObjectNamespace;
@@ -17,6 +18,8 @@ export {
 
 // Export the workflow class directly
 export { DeploySnippetWorkflow };
+
+export { MonitorEndpointWorkflow };
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
