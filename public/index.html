@@ -784,8 +784,7 @@
                 console.warn('Status element not found:', statusId);
                 return;
             }
-
-            console.log('Updating status element:', statusId);
+            
             if (status.completed) {
                 console.log('Workflow completed, clearing status');
                 statusElement.innerHTML = '';
@@ -803,18 +802,49 @@
                             deployButton.innerHTML = 'Deploy Snippet';
                         }, 5000);
                     }
-                } else {
-                    console.warn('Deploy button not found for:', lbName);
+                }
+
+                // Clear timer if workflow is completed
+                if (window.deploymentTimers?.[lbName]) {
+                    clearInterval(window.deploymentTimers[lbName].timerId);
+                    delete window.deploymentTimers[lbName];
                 }
             } else {
-                console.log('Workflow in progress, updating status');
-                statusElement.innerHTML = `
-                    <div class="deployment-progress">
-                        <span class="spinner"></span>
-                        <span class="step">${status.currentStep || 'Processing...'}</span>
-                        ${status.startTime ? `<span class="time">Started ${formatTime(status.startTime)}</span>` : ''}
-                    </div>
-                `;
+                // Start timer if it doesn't exist
+                if (!window.deploymentTimers) {
+                    window.deploymentTimers = {};
+                }
+                
+                if (!window.deploymentTimers[lbName]) {
+                    // Initial setup of status element
+                    statusElement.innerHTML = `
+                        <div class="deployment-progress">
+                            <span class="spinner"></span>
+                            <span class="step">${status.currentStep || 'Processing...'}</span>
+                            <span class="time">Started 0s ago</span>
+                        </div>
+                    `;
+
+                    const startTime = Date.now();
+                    window.deploymentTimers[lbName] = {
+                        startTime,
+                        timerId: setInterval(() => {
+                            if (statusElement) {
+                                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                                const timeElement = statusElement.querySelector('.time');
+                                if (timeElement) {
+                                    timeElement.textContent = `Started ${elapsed}s ago`;
+                                }
+                            }
+                        }, 1000)
+                    };
+                } else {
+                    // Just update the step text, leaving the timer untouched
+                    const stepElement = statusElement.querySelector('.step');
+                    if (stepElement) {
+                        stepElement.textContent = status.currentStep || 'Processing...';
+                    }
+                }
                 
                 // Update deploy button
                 const deployButton = document.querySelector(`button[onclick='deploySnippet("${lbName}")']`);
@@ -826,19 +856,8 @@
                             Deploying...
                         </span>
                     `;
-                } else {
-                    console.warn('Deploy button not found for:', lbName);
                 }
             }
-        }
-
-        function formatTime(timestamp) {
-            const now = Date.now();
-            const diff = Math.floor((now - timestamp) / 1000);
-            
-            if (diff < 60) return `${diff}s ago`;
-            if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-            return `${Math.floor(diff / 3600)}h ago`;
         }
 
         // Start connection when page loads

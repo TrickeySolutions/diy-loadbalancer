@@ -43,6 +43,7 @@ interface WebSocketMessage {
 	config?: LoadBalancerConfig;
 	workflowStatus?: {
 		workflowId: string;
+		loadBalancerName: string;
 		completed: boolean;
 		success: boolean;
 		currentStep?: string;
@@ -60,7 +61,6 @@ export class LoadBalancerDO implements DurableObject {
 		workflowId: string;
 		loadBalancerName: string;
 		currentStep: string;
-		startTime: number;
 	}> = new Map();
 
 	constructor(ctx: DurableObjectState, env: any) {
@@ -489,17 +489,14 @@ export default {
 
 	private broadcastWorkflowStatus(status: any) {
 		console.log('Broadcasting workflow status:', status);
-		console.log('Current session count:', this.sessions.length);
 		
-		// Ensure the status has the required fields
 		const workflowStatus = {
 			workflowId: status.workflowId,
 			loadBalancerName: status.loadBalancerName || 'unknown',
 			completed: status.completed || false,
 			success: status.success || false,
 			currentStep: status.currentStep || 'Processing',
-			error: status.error,
-			startTime: status.startTime || Date.now()
+			error: status.error
 		};
 
 		const message: WebSocketMessage = {
@@ -507,35 +504,23 @@ export default {
 			workflowStatus
 		};
 
-		console.log('Preparing to broadcast message:', message);
-		const messageString = JSON.stringify(message);
-
-		let successCount = 0;
-		let failCount = 0;
-
 		this.sessions = this.sessions.filter(ws => {
 			try {
-				ws.send(messageString);
-				console.log('Successfully sent message to a WebSocket client');
-				successCount++;
+				ws.send(JSON.stringify(message));
 				return true;
 			} catch (error) {
 				console.error('Failed to send WebSocket message:', error);
-				failCount++;
 				return false;
 			}
 		});
-
-		console.log(`Broadcast complete. Sessions remaining: ${this.sessions.length}, Success: ${successCount}, Failed: ${failCount}`);
 	}
 
-	// Add method to track workflow
+	// Simplify trackWorkflow
 	private async trackWorkflow(workflowId: string, loadBalancerName: string) {
 		this.activeWorkflows.set(loadBalancerName, {
 			workflowId,
 			loadBalancerName,
-			currentStep: 'Starting deployment',
-			startTime: Date.now()
+			currentStep: 'Starting deployment'
 		});
 		await this.ctx.storage.put('activeWorkflows', Object.fromEntries(this.activeWorkflows));
 		this.broadcastWorkflowUpdate(loadBalancerName);
@@ -562,18 +547,22 @@ export default {
 		this.broadcastWorkflowUpdate(loadBalancerName);
 	}
 
-	// Add method to broadcast workflow updates
+	// Simplify broadcastWorkflowUpdate
 	private broadcastWorkflowUpdate(loadBalancerName: string) {
 		const workflow = this.activeWorkflows.get(loadBalancerName);
 		const message: WebSocketMessage = {
 			type: 'workflowStatus',
 			workflowStatus: workflow ? {
+				workflowId: workflow.workflowId,
 				loadBalancerName,
-				...workflow,
-				completed: false
+				currentStep: workflow.currentStep,
+				completed: false,
+				success: false
 			} : {
+				workflowId: 'completed',
 				loadBalancerName,
-				completed: true
+				completed: true,
+				success: true
 			}
 		};
 
