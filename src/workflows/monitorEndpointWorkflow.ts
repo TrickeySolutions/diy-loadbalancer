@@ -1,5 +1,13 @@
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
 
+// Add debug logger utility
+const DEBUG = false; // Toggle this to enable/disable verbose logging
+const debug = {
+    log: (...args: any[]) => DEBUG && console.log(...args),
+    error: (...args: any[]) => DEBUG && console.error(...args),
+    info: (...args: any[]) => console.log(...args), // Always log important info
+};
+
 interface EndpointMonitorParams {
     loadBalancerName: string;
     endpoint: string;
@@ -15,20 +23,11 @@ interface MonitorResult {
     message?: string;
 }
 
-export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
-    LOAD_BALANCER: DurableObjectNamespace;
-    LOAD_BALANCER_REGISTRY: DurableObjectNamespace;
-}, EndpointMonitorParams> {
+export class MonitorEndpointWorkflow extends WorkflowEntrypoint<Env, EndpointMonitorParams> {
     async run(event: WorkflowEvent<EndpointMonitorParams>, step: WorkflowStep): Promise<MonitorResult> {
         const { loadBalancerName, endpoint, probePath } = event.payload;
         
-        console.log('\n=== Starting Endpoint Monitor ===');
-        console.log('Monitor details:', {
-            loadBalancer: loadBalancerName,
-            endpoint,
-            probePath,
-            workflowId: event.workflowId
-        });
+        debug.info(`Monitoring ${endpoint} for ${loadBalancerName}`);
 
         // Step 1: Test the endpoint
         const result = await step.do(
@@ -41,7 +40,7 @@ export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
                 },
             },
             async (): Promise<MonitorResult> => {
-                console.log(`Testing endpoint ${endpoint}`);
+                debug.log(`Testing endpoint ${endpoint}`);
                 const startTime = Date.now();
                 
                 try {
@@ -49,13 +48,13 @@ export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
                     const responseTime = Date.now() - startTime;
                     const isHealthy = response.status < 400;
                     
-                    console.log('Health check result:', {
+                    debug.log('Health check result:', {
                         endpoint,
                         status: response.status,
                         isHealthy,
                         responseTime
                     });
-
+                    
                     return {
                         endpoint,
                         isHealthy,
@@ -64,7 +63,7 @@ export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
                         timestamp: Date.now()
                     };
                 } catch (error) {
-                    console.error('Health check failed:', error);
+                    debug.error('Health check failed:', error);
                     return {
                         endpoint,
                         isHealthy: false,
@@ -76,18 +75,8 @@ export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
             }
         );
 
-        // After the health check
-        console.log('Health check completed with result:', {
-            endpoint: result.endpoint,
-            isHealthy: result.isHealthy,
-            statusCode: result.statusCode,
-            responseTime: result.responseTime,
-            timestamp: result.timestamp,
-            message: result.message
-        });
-
         // Step 2: Update the load balancer's health status
-        console.log('\nUpdating load balancer health status');
+        debug.log('Updating health status');
         await step.do(
             'update-health-status',
             {
@@ -114,47 +103,21 @@ export class MonitorEndpointWorkflow extends WorkflowEntrypoint<{
                     })
                 }));
 
-                const updateResult = await updateResponse.json();
-                console.log('Health status update response:', updateResult);
+                if (!updateResponse.ok) {
+                    throw new Error(`Failed to update health status: ${await updateResponse.text()}`);
+                }
 
-                // Add verification step
-                console.log('\n=== Verifying Health Status Update ===');
-                // Simulate the frontend request to verify the status
-                const verifyResponse = await loadBalancer.fetch(new Request('http://localhost/api/health-status', {
-                    method: 'GET',
-                    headers: {
-                        'Cache-Control': 'no-cache',
-                        'Pragma': 'no-cache'
-                    }
-                }));
+                // Verify the update was successful
+                const verifyResponse = await loadBalancer.fetch(new Request('http://localhost/api/health-status'));
+                if (!verifyResponse.ok) {
+                    throw new Error('Failed to verify health status update');
+                }
 
-                const verifyStatus = await verifyResponse.json();
-                console.log('Verification - Current DO health status:', JSON.stringify(verifyStatus, null, 2));
-
-                // Also verify through the registry to see what the frontend would get
-                const registryId = this.env.LOADBALANCER_REGISTRY.idFromName('default');
-                const registry = this.env.LOADBALANCER_REGISTRY.get(registryId);
-                const registryResponse = await registry.fetch(new Request('http://localhost/api/loadbalancers', {
-                    headers: {
-                        'Cache-Control': 'no-cache',
-                        'Pragma': 'no-cache'
-                    }
-                }));
-
-                const registryData = await registryResponse.json();
-                console.log('Verification - What frontend would receive:', JSON.stringify(registryData, null, 2));
-                console.log('=== Verification Complete ===\n');
+                debug.log('Health status updated successfully');
             }
         );
 
-        // Before sending the update
-        console.log('Sending health status update with:', {
-            endpoint: result.endpoint,
-            isHealthy: result.isHealthy,
-            timestamp: Date.now()
-        });
-
-        console.log('=== Endpoint Monitor Complete ===\n');
+        debug.info(`Health check complete for ${endpoint}: ${result.isHealthy ? 'healthy' : 'unhealthy'}`);
         return result;
     }
 }
