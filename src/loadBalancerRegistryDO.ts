@@ -1,3 +1,7 @@
+interface LoadBalancerRegistry {
+	[key: string]: any;
+}
+
 export class LoadBalancerRegistryDO implements DurableObject {
 	private ctx: DurableObjectState;
 
@@ -12,7 +16,7 @@ export class LoadBalancerRegistryDO implements DurableObject {
 			const data = await request.json() as { id: string; config: any };
 			
 			// Get existing load balancers
-			const loadBalancers = await this.ctx.storage.get('loadbalancers') || {};
+			const loadBalancers: LoadBalancerRegistry = await this.ctx.storage.get('loadbalancers') || {};
 			
 			// Store the full config
 			loadBalancers[data.id] = data.config;
@@ -26,7 +30,11 @@ export class LoadBalancerRegistryDO implements DurableObject {
 
 		if (request.method === 'DELETE' && url.pathname.startsWith('/api/loadbalancer/')) {
 			const id = url.pathname.split('/').pop();
-			const loadBalancers = await this.ctx.storage.get('loadbalancers') || {};
+			if (!id) {
+				return new Response('Invalid ID', { status: 400 });
+			}
+
+			const loadBalancers: LoadBalancerRegistry = await this.ctx.storage.get('loadbalancers') || {};
 			
 			delete loadBalancers[id];
 			await this.ctx.storage.put('loadbalancers', loadBalancers);
@@ -38,7 +46,7 @@ export class LoadBalancerRegistryDO implements DurableObject {
 		}
 
 		if (request.method === 'GET' && url.pathname === '/api/loadbalancers') {
-			const loadBalancers = await this.ctx.storage.get('loadbalancers') || {};
+			const loadBalancers: LoadBalancerRegistry = await this.ctx.storage.get('loadbalancers') || {};
 			// Convert to array format
 			const loadBalancerArray = Object.entries(loadBalancers).map(([name, config]) => ({
 				name,

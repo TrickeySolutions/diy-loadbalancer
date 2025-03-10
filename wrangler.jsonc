@@ -7,9 +7,7 @@
 		"enabled": true
 	},
 	"assets": {
-		"directory": "public",
-		// "browser_TTL": 0,
-		// "serve_single_page_app": true
+		"directory": "public"
 	},
 	"durable_objects": {
 		"bindings": [
@@ -27,6 +25,13 @@
 		{
 			"tag": "v1",
 			"new_classes": ["LoadBalancerDO", "LoadBalancerRegistryDO"]
+		}
+	],
+	"workflows": [
+		{
+			"name": "deploy-snippet",
+			"binding": "DEPLOY_SNIPPET_WORKFLOW",
+			"class_name": "DeploySnippetWorkflow"
 		}
 	],
 	"vars": {

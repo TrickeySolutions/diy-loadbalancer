@@ -1,13 +1,22 @@
 import { LoadBalancerDO } from './loadBalancerDO';
 import { LoadBalancerRegistryDO } from './loadBalancerRegistryDO';
+import { DeploySnippetWorkflow } from './workflows/deploySnippetWorkflow';
 
 export interface Env {
 	LOAD_BALANCER: DurableObjectNamespace;
 	ASSETS: DurableObjectNamespace & { fetch: (request: Request) => Promise<Response> };
 	LOADBALANCER_REGISTRY: DurableObjectNamespace;
+	DEPLOY_SNIPPET_WORKFLOW: any;
 }
 
-export { LoadBalancerDO, LoadBalancerRegistryDO };
+// Export all required classes
+export { 
+	LoadBalancerDO, 
+	LoadBalancerRegistryDO
+};
+
+// Export the workflow class directly
+export { DeploySnippetWorkflow };
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -67,6 +76,13 @@ export default {
 
 		// Handle deploy snippet requests
 		if (url.pathname === '/api/loadbalancer/deploy-snippet') {
+			const id = env.LOAD_BALANCER.idFromName('default');
+			const loadBalancer = env.LOAD_BALANCER.get(id);
+			return loadBalancer.fetch(request);
+		}
+
+		// Handle workflow status checks
+		if (url.pathname.startsWith('/api/workflow-status/')) {
 			const id = env.LOAD_BALANCER.idFromName('default');
 			const loadBalancer = env.LOAD_BALANCER.get(id);
 			return loadBalancer.fetch(request);

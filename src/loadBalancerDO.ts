@@ -1,4 +1,5 @@
-import { LoadBalancerRegistryDO } from './loadBalancerRegistryDO'; // Import the registry
+import { LoadBalancerRegistryDO } from './loadBalancerRegistryDO';
+import { DeploySnippetWorkflow } from './workflows/deploySnippetWorkflow';
 
 interface LoadBalancerConfig {
 	name: string;
@@ -32,6 +33,21 @@ interface SnippetDeployment {
 	success: boolean;
 	error?: string;
 	snippetId?: string;
+	workflowId?: string;
+}
+
+// Add new type for WebSocket messages
+interface WebSocketMessage {
+	type: 'initialHealthStatus' | 'healthStatusUpdate' | 'configUpdate' | 'workflowStatus';
+	healthStatus?: HealthStatus;
+	config?: LoadBalancerConfig;
+	workflowStatus?: {
+		workflowId: string;
+		completed: boolean;
+		success: boolean;
+		currentStep?: string;
+		error?: string;
+	};
 }
 
 export class LoadBalancerDO implements DurableObject {
@@ -40,6 +56,12 @@ export class LoadBalancerDO implements DurableObject {
 	private sessions: WebSocket[] = [];
 	private healthCheckInterval: number | null = null;
 	private env: any; // Add env property
+	private activeWorkflows: Map<string, {
+		workflowId: string;
+		loadBalancerName: string;
+		currentStep: string;
+		startTime: number;
+	}> = new Map();
 
 	constructor(ctx: DurableObjectState, env: any) {
 		this.ctx = ctx;
@@ -50,7 +72,8 @@ export class LoadBalancerDO implements DurableObject {
 			healthCheckConfig: {
 				probeInterval: 30,
 				probePath: '/'
-			}
+			},
+			expression: {}
 		};
 	}
 
@@ -63,11 +86,23 @@ export class LoadBalancerDO implements DurableObject {
 			// Accept the WebSocket connection
 			server.accept();
 			
+			// Add to sessions array
+			this.sessions.push(server);
+			
 			// Send initial empty health status
 			server.send(JSON.stringify({
 				type: 'initialHealthStatus',
 				healthStatus: {}
 			}));
+
+			// Handle WebSocket closure
+			server.addEventListener('close', () => {
+				this.sessions = this.sessions.filter(ws => ws !== server);
+			});
+
+			server.addEventListener('error', () => {
+				this.sessions = this.sessions.filter(ws => ws !== server);
+			});
 
 			return new Response(null, {
 				status: 101,
@@ -176,6 +211,20 @@ export class LoadBalancerDO implements DurableObject {
 					error: 'Failed to deploy snippet'
 				}), { status: 500 });
 			}
+		}
+
+		if (url.pathname === '/api/loadbalancer/generate-snippet') {
+			return this.handleGenerateSnippet(request);
+		}
+
+		if (url.pathname.startsWith('/api/workflow-status/')) {
+			return this.handleWorkflowStatus(request);
+		}
+
+		if (url.pathname === '/api/broadcast-status' && request.method === 'POST') {
+			const status = await request.json();
+			this.broadcastWorkflowStatus(status);
+			return new Response(JSON.stringify({ success: true }));
 		}
 
 		return new Response('Not found', { status: 404 });
@@ -351,151 +400,189 @@ export default {
 			};
 		}
 
-		const snippet = this.generateSnippet(config);
-		const sanitizedName = this.sanitizeSnippetName(config.name);
-		
 		try {
-			// First, check if the snippet exists
-			const checkResponse = await fetch(
-				`https://api.cloudflare.com/client/v4/zones/${this.env.CF_ZONE_ID}/snippets/${sanitizedName}`,
-				{
-					method: 'GET',
-					headers: {
-						'Authorization': `Bearer ${this.env.CF_API_TOKEN}`
-					}
+			console.log('Starting deployment workflow for:', config.name);
+			console.log('Workflow binding:', this.env.DEPLOY_SNIPPET_WORKFLOW);
+			
+			// Create a new workflow instance
+			const instance = await this.env.DEPLOY_SNIPPET_WORKFLOW.create({
+				params: {
+					loadBalancerName: config.name,
+					config: config
 				}
-			);
-
-			const method = checkResponse.status === 404 ? 'POST' : 'PUT';
-			const endpoint = `https://api.cloudflare.com/client/v4/zones/${this.env.CF_ZONE_ID}/snippets${method === 'PUT' ? '/' + sanitizedName : ''}`;
-
-			// Create FormData for the snippet
-			const formData = new FormData();
-			const snippetBlob = new Blob([snippet.code], { type: 'application/javascript' });
-			formData.append('files', snippetBlob, 'snippet.js');
-			formData.append('metadata', JSON.stringify({
-				name: sanitizedName,
-				description: `Load balancer for ${config.name}`,
-				enabled: true,
-				main_module: 'snippet.js'
-			}));
-
-			// Deploy or update the snippet
-			const snippetResponse = await fetch(endpoint, {
-				method: method,
-				headers: {
-					'Authorization': `Bearer ${this.env.CF_API_TOKEN}`
-				},
-				body: formData
 			});
 
-			if (!snippetResponse.ok) {
-				const errorText = await snippetResponse.text();
-				let errorData;
-				try {
-					errorData = JSON.parse(errorText);
-				} catch (e) {
-					errorData = { errors: [{ message: errorText }] };
-				}
-				throw new Error(`Failed to deploy snippet: ${JSON.stringify(errorData)}`);
-			}
+			console.log('Workflow instance created:', instance);
+			console.log('Workflow ID:', instance.id);
 
-			const snippetData = await snippetResponse.json();
-			if (!snippetData.success) {
-				throw new Error(`Failed to deploy snippet: ${JSON.stringify(snippetData.errors)}`);
-			}
+			// Track the new workflow
+			await this.trackWorkflow(instance.id, config.name);
 
-			// After successful snippet deployment, handle the rules
-			const conditions = [];
-			if (config.expression?.hostname) {
-				conditions.push(`(http.host eq "${config.expression.hostname}")`);
-			}
-			if (config.expression?.path) {
-				conditions.push(`(http.request.uri.path contains "${config.expression.path}")`);
-			}
-
-			const expression = conditions.length > 0 ? conditions.join(' and ') : 'true';
-
-			// First, get all existing rules
-			const getRulesResponse = await fetch(
-				`https://api.cloudflare.com/client/v4/zones/${this.env.CF_ZONE_ID}/snippets/snippet_rules`,
-				{
-					method: 'GET',
-					headers: {
-						'Authorization': `Bearer ${this.env.CF_API_TOKEN}`,
-						'Content-Type': 'application/json'
-					}
-				}
-			);
-
-			if (!getRulesResponse.ok) {
-				const errorText = await getRulesResponse.text();
-				throw new Error(`Failed to fetch existing rules: ${errorText}`);
-			}
-
-			const existingRulesData = await getRulesResponse.json();
-			console.log('Existing rules response:', existingRulesData);
-
-			// Get existing rules, ensuring we don't lose them if result is null
-			const existingRules = existingRulesData?.result || [];
-			
-			// Create our new rule
-			const newRule = {
-				description: `Rule for load balancer: ${config.name}`,
-				enabled: true,
-				expression: expression,
-				snippet_name: sanitizedName
-			};
-
-			// If result was null, just add our new rule
-			// If we have existing rules, update or add our rule while preserving others
-			const updatedRules = existingRules.length > 0
-				? existingRules
-					.filter((rule: any) => rule.snippet_name !== sanitizedName)
-					.concat([newRule])
-				: [newRule];
-
-			// Update rules
-			const ruleResponse = await fetch(
-				`https://api.cloudflare.com/client/v4/zones/${this.env.CF_ZONE_ID}/snippets/snippet_rules`,
-				{
-					method: 'PUT',
-					headers: {
-						'Authorization': `Bearer ${this.env.CF_API_TOKEN}`,
-						'Content-Type': 'application/json'
-					},
-					body: JSON.stringify({
-						rules: updatedRules
-					})
-				}
-			);
-
-			if (!ruleResponse.ok) {
-				const errorText = await ruleResponse.text();
-				let errorData;
-				try {
-					errorData = JSON.parse(errorText);
-				} catch (e) {
-					errorData = { errors: [{ message: errorText }] };
-				}
-				throw new Error(`Failed to create snippet rule: ${JSON.stringify(errorData)}`);
-			}
-
-			const ruleData = await ruleResponse.json();
-			if (!ruleData.success) {
-				throw new Error(`Failed to create snippet rule: ${JSON.stringify(ruleData.errors)}`);
-			}
-
-			return { 
-				success: true, 
-				snippetId: sanitizedName 
+			return {
+				success: true,
+				workflowId: instance.id
 			};
 		} catch (error) {
-			console.error('Deployment error:', error);
-			return { 
-				success: false, 
-				error: error instanceof Error ? error.message : 'Unknown error occurred' 
+			console.error('Error starting deployment workflow:', error);
+			return {
+				success: false,
+				error: error instanceof Error ? error.message : 'Unknown error occurred'
 			};
 		}
+	}
+
+	private async handleGenerateSnippet(request: Request): Promise<Response> {
+		const url = new URL(request.url);
+		const name = url.searchParams.get('name');
+		if (!name) {
+			return new Response('Load balancer name is required', { status: 400 });
+		}
+
+		const config = await this.getLoadBalancerConfig(name);
+		if (!config) {
+			return new Response('Load balancer not found', { status: 404 });
+		}
+
+		const snippet = this.generateSnippet(config);
+		return new Response(JSON.stringify(snippet), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
+
+	// Update the workflow status handler
+	async handleWorkflowStatus(request: Request): Promise<Response> {
+		const url = new URL(request.url);
+		const workflowId = url.pathname.split('/workflow-status/')[1];
+		
+		if (!workflowId) {
+			return new Response('Workflow ID is required', { status: 400 });
+		}
+
+		try {
+			console.log('Getting workflow instance for ID:', workflowId);
+			const instance = await this.env.DEPLOY_SNIPPET_WORKFLOW.get(workflowId);
+			console.log('Got workflow instance:', instance);
+			
+			console.log('Getting workflow status');
+			const status = await instance.status();
+			console.log('Raw workflow status:', status);
+
+			if (status.completed) {
+				await this.updateWorkflowStatus(workflowId, 'Complete', true);
+			} else {
+				await this.updateWorkflowStatus(workflowId, status.currentStep || 'Processing');
+			}
+
+			return new Response(JSON.stringify(status), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		} catch (error) {
+			console.error('Error getting workflow status:', error);
+			return new Response(JSON.stringify({
+				error: 'Failed to get workflow status',
+				details: error instanceof Error ? error.message : 'Unknown error'
+			}), { status: 500 });
+		}
+	}
+
+	private broadcastWorkflowStatus(status: any) {
+		console.log('Broadcasting workflow status:', status);
+		console.log('Current session count:', this.sessions.length);
+		
+		// Ensure the status has the required fields
+		const workflowStatus = {
+			workflowId: status.workflowId,
+			loadBalancerName: status.loadBalancerName || 'unknown',
+			completed: status.completed || false,
+			success: status.success || false,
+			currentStep: status.currentStep || 'Processing',
+			error: status.error,
+			startTime: status.startTime || Date.now()
+		};
+
+		const message: WebSocketMessage = {
+			type: 'workflowStatus',
+			workflowStatus
+		};
+
+		console.log('Preparing to broadcast message:', message);
+		const messageString = JSON.stringify(message);
+
+		let successCount = 0;
+		let failCount = 0;
+
+		this.sessions = this.sessions.filter(ws => {
+			try {
+				ws.send(messageString);
+				console.log('Successfully sent message to a WebSocket client');
+				successCount++;
+				return true;
+			} catch (error) {
+				console.error('Failed to send WebSocket message:', error);
+				failCount++;
+				return false;
+			}
+		});
+
+		console.log(`Broadcast complete. Sessions remaining: ${this.sessions.length}, Success: ${successCount}, Failed: ${failCount}`);
+	}
+
+	// Add method to track workflow
+	private async trackWorkflow(workflowId: string, loadBalancerName: string) {
+		this.activeWorkflows.set(loadBalancerName, {
+			workflowId,
+			loadBalancerName,
+			currentStep: 'Starting deployment',
+			startTime: Date.now()
+		});
+		await this.ctx.storage.put('activeWorkflows', Object.fromEntries(this.activeWorkflows));
+		this.broadcastWorkflowUpdate(loadBalancerName);
+	}
+
+	// Add method to update workflow status
+	private async updateWorkflowStatus(workflowId: string, currentStep: string, completed = false) {
+		// Find the workflow by ID
+		const entry = Array.from(this.activeWorkflows.entries())
+			.find(([_, w]) => w.workflowId === workflowId);
+		
+		if (!entry) return;
+		
+		const [loadBalancerName, workflow] = entry;
+		
+		if (completed) {
+			this.activeWorkflows.delete(loadBalancerName);
+		} else {
+			workflow.currentStep = currentStep;
+			this.activeWorkflows.set(loadBalancerName, workflow);
+		}
+		
+		await this.ctx.storage.put('activeWorkflows', Object.fromEntries(this.activeWorkflows));
+		this.broadcastWorkflowUpdate(loadBalancerName);
+	}
+
+	// Add method to broadcast workflow updates
+	private broadcastWorkflowUpdate(loadBalancerName: string) {
+		const workflow = this.activeWorkflows.get(loadBalancerName);
+		const message: WebSocketMessage = {
+			type: 'workflowStatus',
+			workflowStatus: workflow ? {
+				loadBalancerName,
+				...workflow,
+				completed: false
+			} : {
+				loadBalancerName,
+				completed: true
+			}
+		};
+
+		this.sessions.forEach(ws => {
+			try {
+				ws.send(JSON.stringify(message));
+			} catch (error) {
+				console.error('Error sending workflow update:', error);
+			}
+		});
 	}
 } 

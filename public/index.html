@@ -274,6 +274,34 @@
         .button-content.loading {
             opacity: 0.7;
         }
+
+        .button-content.success {
+            color: var(--success);
+        }
+
+        .button-content.error {
+            color: var(--danger);
+            font-size: 0.9em;
+        }
+
+        .deployment-status {
+            margin: 8px 0;
+            font-size: 0.9em;
+        }
+
+        .deployment-progress {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px;
+            background: var(--background-alt);
+            border-radius: 4px;
+        }
+
+        .deployment-progress .time {
+            color: var(--text-muted);
+            margin-left: auto;
+        }
     </style>
     <script>
         let currentLoadBalancer = null;
@@ -390,6 +418,12 @@
                             `).join('')
                             : 'No hosts configured'}
                     </div>
+                    <div class="deployment-status">
+                        <h4>Deployment Status:</h4>
+                        <div id="deployment-${lb.name.replace(/[^a-z0-9]/gi, '_')}" class="deployment-status">
+                            <!-- Deployment status will be inserted here -->
+                        </div>
+                    </div>
                     <div class="actions">
                         <button class="btn btn-edit" onclick='showModal("edit", ${JSON.stringify(lb).replace(/'/g, "&#39;")})'>
                             Edit
@@ -433,20 +467,44 @@
         }
 
         function connectWebSocket() {
-            const ws = new WebSocket('ws://localhost:8787/api/ws');
+            console.log('Attempting WebSocket connection...');
+            const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
 
             ws.onopen = () => {
-                console.log('WebSocket connected');
+                console.log('WebSocket connection established');
             };
 
             ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                if (data.type === 'initialHealthStatus' || data.type === 'healthStatusUpdate') {
-                    console.log('Health Status:', data.healthStatus);
-                    updateHealthStatusUI(data.healthStatus);
-                } else if (data.type === 'configUpdate') {
-                    console.log('Config Update:', data.config);
-                    updateConfigUI(data.config);
+                const rawData = event.data;
+                console.log('Raw WebSocket message received:', rawData);
+                
+                try {
+                    const data = JSON.parse(rawData);
+                    console.log('Parsed WebSocket message:', data);
+                    
+                    switch (data.type) {
+                        case 'initialHealthStatus':
+                            console.log('Handling initial health status');
+                            updateHealthStatusUI(data.healthStatus);
+                            break;
+                        case 'healthStatusUpdate':
+                            console.log('Handling health status update');
+                            updateHealthStatusUI(data.healthStatus);
+                            break;
+                        case 'configUpdate':
+                            console.log('Handling config update');
+                            updateConfigUI(data.config);
+                            break;
+                        case 'workflowStatus':
+                            console.log('Handling workflow status update:', data.workflowStatus);
+                            handleWorkflowStatus(data.workflowStatus);
+                            break;
+                        default:
+                            console.warn('Unknown message type:', data.type);
+                    }
+                } catch (error) {
+                    console.error('Error processing WebSocket message:', error);
+                    console.error('Raw message was:', rawData);
                 }
             };
 
@@ -455,19 +513,32 @@
             };
 
             ws.onclose = (event) => {
-                console.log('WebSocket closed. Attempting to reconnect in 5 seconds...');
+                console.warn('WebSocket closed:', event.code, event.reason);
+                console.log('Attempting to reconnect in 5 seconds...');
                 setTimeout(connectWebSocket, 5000);
             };
+
+            // Store the WebSocket instance globally for debugging
+            window.debugWebSocket = ws;
         }
 
         function updateHealthStatusUI(healthStatus) {
             const statusDiv = document.getElementById('health-status');
+            if (!statusDiv) {
+                console.warn('Health status div not found');
+                return;
+            }
+
             let html = '<h2>Health Status</h2>';
-            for (const [host, status] of Object.entries(healthStatus)) {
-                const statusClass = status ? 'healthy' : 'unhealthy';
-                html += `<div class="host-status ${statusClass}">
-                    <span>${host}</span>: ${status ? '✅ Healthy' : '❌ Unhealthy'}
-                </div>`;
+            if (Object.keys(healthStatus).length === 0) {
+                html += '<div class="host-status">No health status available</div>';
+            } else {
+                for (const [host, status] of Object.entries(healthStatus)) {
+                    const statusClass = status ? 'healthy' : 'unhealthy';
+                    html += `<div class="host-status ${statusClass}">
+                        <span>${host}</span>: ${status ? '✅ Healthy' : '❌ Unhealthy'}
+                    </div>`;
+                }
             }
             statusDiv.innerHTML = html;
         }
@@ -662,12 +733,10 @@
                 return;
             }
 
-            // Get the deploy button for this load balancer
             const deployButton = document.querySelector(`button[onclick='deploySnippet("${name}")']`);
             const originalContent = deployButton.innerHTML;
 
             try {
-                // Update button to show loading state
                 deployButton.innerHTML = `
                     <span class="button-content loading">
                         <span class="spinner"></span>
@@ -682,19 +751,94 @@
                 
                 const result = await response.json();
                 
-                if (result.success) {
-                    alert('Snippet deployed successfully!');
-                } else {
+                if (!result.success) {
                     throw new Error(result.error || 'Failed to deploy snippet');
                 }
+
+                // Store the button reference for later use
+                window.deployButtons = window.deployButtons || {};
+                window.deployButtons[result.workflowId] = {
+                    button: deployButton,
+                    name: name
+                };
+
             } catch (error) {
                 console.error('Error deploying snippet:', error);
                 alert('Failed to deploy snippet: ' + error.message);
-            } finally {
-                // Restore button to original state
                 deployButton.innerHTML = originalContent;
                 deployButton.disabled = false;
             }
+        }
+
+        function handleWorkflowStatus(status) {
+            console.log('Processing workflow status:', status);
+            const lbName = status.loadBalancerName;
+            if (!lbName) {
+                console.warn('No loadBalancerName in status:', status);
+                return;
+            }
+
+            const statusId = `deployment-${lbName.replace(/[^a-z0-9]/gi, '_')}`;
+            const statusElement = document.getElementById(statusId);
+            if (!statusElement) {
+                console.warn('Status element not found:', statusId);
+                return;
+            }
+
+            console.log('Updating status element:', statusId);
+            if (status.completed) {
+                console.log('Workflow completed, clearing status');
+                statusElement.innerHTML = '';
+                
+                // Update deploy button
+                const deployButton = document.querySelector(`button[onclick='deploySnippet("${lbName}")']`);
+                if (deployButton) {
+                    if (status.success) {
+                        deployButton.innerHTML = 'Deploy Snippet';
+                        deployButton.disabled = false;
+                    } else {
+                        deployButton.innerHTML = `Deploy Failed: ${status.error || 'Unknown error'}`;
+                        deployButton.disabled = false;
+                        setTimeout(() => {
+                            deployButton.innerHTML = 'Deploy Snippet';
+                        }, 5000);
+                    }
+                } else {
+                    console.warn('Deploy button not found for:', lbName);
+                }
+            } else {
+                console.log('Workflow in progress, updating status');
+                statusElement.innerHTML = `
+                    <div class="deployment-progress">
+                        <span class="spinner"></span>
+                        <span class="step">${status.currentStep || 'Processing...'}</span>
+                        ${status.startTime ? `<span class="time">Started ${formatTime(status.startTime)}</span>` : ''}
+                    </div>
+                `;
+                
+                // Update deploy button
+                const deployButton = document.querySelector(`button[onclick='deploySnippet("${lbName}")']`);
+                if (deployButton) {
+                    deployButton.disabled = true;
+                    deployButton.innerHTML = `
+                        <span class="button-content loading">
+                            <span class="spinner"></span>
+                            Deploying...
+                        </span>
+                    `;
+                } else {
+                    console.warn('Deploy button not found for:', lbName);
+                }
+            }
+        }
+
+        function formatTime(timestamp) {
+            const now = Date.now();
+            const diff = Math.floor((now - timestamp) / 1000);
+            
+            if (diff < 60) return `${diff}s ago`;
+            if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+            return `${Math.floor(diff / 3600)}h ago`;
         }
 
         // Start connection when page loads
@@ -711,6 +855,11 @@
             <button class="btn btn-primary" onclick="showModal('create')">
                 Create Load Balancer
             </button>
+        </div>
+
+        <div id="health-status">
+            <h2>Health Status</h2>
+            <!-- Health status will be inserted here -->
         </div>
 
         <div class="load-balancer-grid" id="loadbalancers-list">
