@@ -663,27 +663,48 @@
             });
 
             socket.addEventListener('message', (event) => {
-                const message = JSON.parse(event.data);
-                console.log('=== WebSocket Message Received ===', message);
+                const data = JSON.parse(event.data);
+                console.log('=== WebSocket Message Received ===', data);
 
-                // Handle ping messages
-                if (message.type === 'ping') {
-                    socket.send(JSON.stringify({ type: 'pong' }));
-                    return;
-                }
+                switch (data.type) {
+                    case 'workflowStatus':
+                        console.log('Handling workflow status update:', data.workflowStatus);
+                        handleWorkflowStatus(data.workflowStatus);
+                        //const status = data.workflowStatus;
+                        //const loadBalancerCard = document.querySelector(`[data-name="${status.loadBalancerName}"]`);
+                        //if (loadBalancerCard) {
+                        //    const deployButton = loadBalancerCard.querySelector('.deploy-button');
+                        //    const statusDiv = loadBalancerCard.querySelector('.deployment-status');
 
-                switch (message.type) {
+                        //    if (status.completed) {
+                        //        deployButton.textContent = 'Deploy';
+                        //        deployButton.disabled = false;
+                        //        if (status.success) {
+                        //            statusDiv.textContent = 'Deployment successful';
+                        //            statusDiv.className = 'deployment-status success';
+                        //        } else {
+                        //            statusDiv.textContent = status.error || 'Deployment failed';
+                        //            statusDiv.className = 'deployment-status error';
+                        //        }
+                        //    } else {
+                        //        deployButton.textContent = 'Deploying...';
+                        //        deployButton.disabled = true;
+                        //        statusDiv.textContent = status.currentStep || 'Processing...';
+                        //        statusDiv.className = 'deployment-status in-progress';
+                        //    }
+                        //}
+                        break;
                     case 'loadBalancersUpdate':
                         console.log('Processing load balancers update');
-                        updateLoadBalancersList(message.loadBalancers);
+                        updateLoadBalancersList(data.loadBalancers);
                         break;
                     case 'initialHealthStatus':
                         console.log('Processing initial health status');
-                        updateHealthStatus(message.healthStatus);
+                        updateHealthStatus(data.healthStatus);
                         break;
                     case 'healthStatusUpdate':
                         console.log('Processing health status update');
-                        updateHealthStatus(message.healthStatus);
+                        updateHealthStatus(data.healthStatus);
                         break;
                     case 'configUpdate':
                         console.log('Processing config update');
