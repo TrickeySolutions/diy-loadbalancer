@@ -19,6 +19,7 @@ interface LoadBalancerConfig {
 		hostname?: string;
 		path?: string;
 	};
+	healthStatus?: HealthStatus;
 }
 
 interface HealthStatus {
@@ -196,8 +197,13 @@ export class LoadBalancerDO implements DurableObject {
 			const registry = this.env.LOADBALANCER_REGISTRY.get(registryId);
 			
 			try {
-				const response = await registry.fetch(new Request(`${url.origin}/api/loadbalancers`));
-				const loadBalancers = await response.json();
+				// Get both the config and health status
+				const [configResponse, healthStatus] = await Promise.all([
+					registry.fetch(new Request(`${url.origin}/api/loadbalancers`)),
+					this.ctx.storage.get('healthStatus')
+				]);
+				
+				const loadBalancers = await configResponse.json();
 				
 				// Find the specific load balancer
 				const config = loadBalancers.find((lb: LoadBalancerConfig) => lb.name === name);
@@ -206,7 +212,10 @@ export class LoadBalancerDO implements DurableObject {
 					return new Response('Load balancer not found', { status: 404 });
 				}
 
-				const snippet = this.generateSnippet(config);
+				// Store the health status in the DO's storage so generateSnippet can access it
+				await this.ctx.storage.put('healthStatus', healthStatus || {});
+
+				const snippet = await this.generateSnippet(config);
 				return new Response(JSON.stringify(snippet), {
 					status: 200,
 					headers: { 'Content-Type': 'application/json' }
@@ -488,15 +497,27 @@ export class LoadBalancerDO implements DurableObject {
 		debug.log(`Config update broadcast to ${successCount} clients`);
 	}
 
-	private generateSnippet(config: LoadBalancerConfig): LoadBalancerSnippet {
+	private async generateSnippet(config: LoadBalancerConfig): Promise<LoadBalancerSnippet> {
+		// Get only healthy endpoints using the health status from the config
+		const healthyEndpoints = config.hosts.filter(host => 
+			config.healthStatus?.[host]?.isHealthy === true
+		);
+
+		console.log('Generating snippet with config:', {
+			name: config.name,
+			totalHosts: config.hosts.length,
+			healthyEndpoints,
+			healthStatus: config.healthStatus
+		});
+
 		const snippetCode = `
 export default {
 	async fetch(request, env, ctx) {
 		// Define the available backend endpoints
-		const healthyEndpoints = ${JSON.stringify(config.hosts, null, 2)};
+		const healthyEndpoints = ${JSON.stringify(healthyEndpoints, null, 2)};
 
 		if (healthyEndpoints.length === 0) {
-			return new Response("No available backend", { status: 503 });
+			return new Response("No healthy backends available", { status: 503 });
 		}
 
 		// Get original request information
@@ -621,7 +642,7 @@ export default {
 			return new Response('Load balancer not found', { status: 404 });
 		}
 
-		const snippet = this.generateSnippet(config);
+		const snippet = await this.generateSnippet(config);
 		return new Response(JSON.stringify(snippet), {
 			status: 200,
 			headers: { 'Content-Type': 'application/json' }
