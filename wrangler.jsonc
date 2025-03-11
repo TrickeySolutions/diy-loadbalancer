@@ -3,6 +3,7 @@
 	"name": "diy-loadbalancer",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-03-03",
+	"logpush" : true,
 	"observability": {
 		"enabled": true
 	},
